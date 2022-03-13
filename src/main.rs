@@ -761,27 +761,31 @@ fn firing_system(
     firing_line: ResMut<FiringLine>,
 ) {
     // Removes old firing line
-    // if firing_line.0.is_some() {}
     let firing_line = firing_line.into_inner();
+    // If line component exists remove
     if let Some(line) = firing_line.0 {
         commands.entity(line).despawn();
         firing_line.0 = None
     }
     let window = windows.get_primary().expect("no primary window");
+    // If cursor has position in window
     if let Some(cursor_position) = window.cursor_position() {
         let cursor_position =
         cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
         let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
+        // Get cursor right position relative to camera
         let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
         if let Some(selected) = selected_entity.0 {
             
-            // Draw line from selected unit to cursor
+            // Get the pixels corresponding to the center of the hex `selected` on the grid.
             let hex = hex_grid.logical_pixel_coordinates(selected);
+            // Gets the distance from `hex` to `cursor_position`.
             let dist = cartesian_distance(hex, cursor_position.to_array());
-            
+            // Get the angle between the points `hex` and `cursor_position`
             let angle = angle_between_two_points(hex,cursor_position.to_array());
             println!("{:.2}, {:.2}",dist,angle);
-            let mut transform = Transform {
+            // Create the transform for a line
+            let transform = Transform {
                 translation: Vec3::from((hex[0]+dist/2f32, hex[1], 0f32)),
                 rotation: Quat::from_rotation_z(100f32),
                 scale: Vec3::new(
@@ -790,9 +794,7 @@ fn firing_system(
                     0.,
                 ),
             };
-            // transform.rotate(Quat::from_rotation_z(2f32));
-            // transform.rotate(Quat::from_rotation_x(2f32));
-            // transform.rotate(Quat::from_rotation_y(2f32)); 
+            // Create the line entity
             let entity = commands
             .spawn_bundle(SpriteBundle {
                 transform,
