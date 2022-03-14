@@ -356,7 +356,7 @@ fn setup(mut commands: Commands) {
     ];
 
     commands.insert_resource(SelectedUnitOption::default());
-    commands.insert_resource(FiringLine::default());
+    commands.insert_resource(FiringLines::default());
 
     // Add units
     // ----------------------------------------------------
@@ -367,13 +367,13 @@ fn setup(mut commands: Commands) {
     commands.insert_resource(hex_grid);
 }
 #[derive(Default, Debug)]
-struct FiringLine(Option<Entity>);
+struct FiringLines(Vec<Entity>);
 #[derive(Default, Debug)]
 struct SelectedUnitOption(Option<[usize; 2]>);
 #[derive(Component, Debug)]
 struct Unit {
+    firing_buckets: [f32; 3],
     firing_distribution: rand_distr::Normal<f32>,
-    firing_equation: fn(f32) -> f32,
     // Distances to all reachable points from current position.
     distances: HashMap<[usize; 2], usize>,
     movement_range: Vec<Entity>,
@@ -381,14 +381,15 @@ struct Unit {
     maximum_movement: u8,
 }
 impl Unit {
+    const SAMPLES: usize = 10000;
     fn new(
         maximum_movement: u8,
         // map:&HexGrid<HexItem>
     ) -> Self {
+        let firing_distribution = rand_distr::Normal::new(0f32, 0.07f32).unwrap();
         Self {
-            firing_distribution: rand_distr::Normal::new(0f32, 1f32).unwrap(),
-            // f(x)=x
-            firing_equation: |x| x,
+            firing_buckets: buckets(firing_distribution, Self::SAMPLES),
+            firing_distribution,
             distances: HashMap::new(),
             movement_range: Vec::new(),
             maximum_movement,
@@ -476,11 +477,13 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
     hex_grid: ResMut<HexGrid<HexItem>>,
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>)>,
     asset_server: Res<AssetServer>,
+    firing_line: ResMut<FiringLines>,
 ) {
     let window = windows.get_primary().expect("no primary window");
     // Right click de-selects unit if a unit is selected
     let selected_entity = selected_entity.into_inner();
     let hex_grid = hex_grid.into_inner();
+    let firing_line = firing_line.into_inner();
     if buttons.just_pressed(MouseButton::Right) {
         // #[cfg(debug_assertions)]
         // println!("right click");
@@ -497,6 +500,12 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
         selected_entity.0 = None;
         // Remove unit position highlight
         hex_grid.remove_highlight::<HIGHLIGHT_COLOR>(&mut commands);
+
+        // Removes old firing lines
+        for line in firing_line.0.iter() {
+            commands.entity(*line).despawn();
+        }
+        firing_line.0 = Vec::new();
     }
     if buttons.just_pressed(MouseButton::Left) {
         // #[cfg(debug_assertions)]
@@ -562,6 +571,12 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
                         // Movement range
                         clear_reachable(unit, &mut commands);
                         render_reachable(unit, &mut commands, indices, hex_grid, asset_server);
+                        // Removes old firing lines
+
+                        for line in firing_line.0.iter() {
+                            commands.entity(*line).despawn();
+                        }
+                        firing_line.0 = Vec::new();
                     } else {
                         println!("Cannot move: Outside unit's remaining movement points.");
                     }
@@ -593,6 +608,11 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
                     );
                     // Set new selected entity.
                     selected_entity.0 = Some(indices);
+                    // Removes old firing lines
+                    for line in firing_line.0.iter() {
+                        commands.entity(*line).despawn();
+                    }
+                    firing_line.0 = Vec::new();
                 }
                 // If we don't have an entity and we didn't click and entity, do nothing
                 _ => {}
@@ -755,67 +775,234 @@ fn camera_movement_system<const MIN_ZOOM: f32, const MAX_ZOOM: f32>(
 fn firing_system(
     selected_entity: ResMut<SelectedUnitOption>,
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>)>,
+    unit_query: Query<(&Unit)>,
     windows: Res<Windows>,
     hex_grid: Res<HexGrid<HexItem>>,
     mut commands: Commands,
-    firing_line: ResMut<FiringLine>,
+    firing_line: ResMut<FiringLines>,
+    mut cursor_evr: EventReader<CursorMoved>,
+    asset_server: Res<AssetServer>,
 ) {
-    // Removes old firing line
     let firing_line = firing_line.into_inner();
-    // If line component exists remove
-    if let Some(line) = firing_line.0 {
-        commands.entity(line).despawn();
-        firing_line.0 = None
-    }
-    let window = windows.get_primary().expect("no primary window");
-    // If cursor has position in window
-    if let Some(cursor_position) = window.cursor_position() {
-        let cursor_position =
-        cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
-        let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
-        // Get cursor right position relative to camera
-        let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
-        if let Some(selected) = selected_entity.0 {
-            
-            // Get the pixels corresponding to the center of the hex `selected` on the grid.
-            let hex = hex_grid.logical_pixel_coordinates(selected);
-            // Gets the distance from `hex` to `cursor_position`.
-            let dist = cartesian_distance(hex, cursor_position.to_array());
-            // Get the angle between the points `hex` and `cursor_position`
-            let angle = angle_between_two_points(hex,cursor_position.to_array());
-            println!("{:.2}, {:.2}",dist,angle);
-            // Create the transform for a line
-            let transform = Transform {
-                translation: Vec3::from((hex[0]+dist/2f32, hex[1], 0f32)),
-                rotation: Quat::from_rotation_z(100f32),
-                scale: Vec3::new(
-                    dist,
-                    10.,
-                    0.,
-                ),
-            };
-            // Create the line entity
-            let entity = commands
-            .spawn_bundle(SpriteBundle {
-                transform,
-                sprite: Sprite {
-                    color: Color::rgb(1., 1., 1.),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
+    // TODO Use cursor position from `_ev` instead of `window`.
+    for _ev in cursor_evr.iter() {
+        // println!(
+        //     "New cursor position: X: {}, Y: {}, in Window ID: {:?}",
+        //     ev.position.x, ev.position.y, ev.id
+        // );
 
-            firing_line.0 = Some(entity.id());
+        // Removes old firing lines
+        for line in firing_line.0.iter() {
+            commands.entity(*line).despawn();
+        }
+        firing_line.0 = Vec::new();
+
+        let window = windows.get_primary().expect("no primary window");
+        // If cursor has position in window
+        if let Some(cursor_position) = window.cursor_position() {
+            let cursor_position =
+                cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
+            let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
+            // Get cursor right position relative to camera
+            let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
+            if let Some(selected) = selected_entity.0 {
+                // Get the pixels corresponding to the center of the hex `selected` on the grid.
+                let hex = hex_grid.logical_pixel_coordinates(selected);
+                let bounds = hex_grid.logical_pixel_bounds();
+                let extended_bounds = {
+                    let [x, y] = bounds;
+                    // We expand bounds so line is drawn to edge and doesn't end at edge hex
+                    let [w, h] = [HexGrid::<HexItem>::WIDTH, HexGrid::<HexItem>::HEIGHT];
+                    [x.start - w..x.end + w, y.start - h..y.end + h]
+                };
+                // Calculate end point
+
+                let center = end_point(
+                    hex,
+                    cursor_position.to_array(),
+                    extended_bounds.clone(),
+                    0f32,
+                );
+                let points = vec![
+                    end_point(
+                        hex,
+                        cursor_position.to_array(),
+                        extended_bounds.clone(),
+                        0.02f32,
+                    ),
+                    end_point(
+                        hex,
+                        cursor_position.to_array(),
+                        extended_bounds.clone(),
+                        -0.02f32,
+                    ),
+                    end_point(
+                        hex,
+                        cursor_position.to_array(),
+                        extended_bounds.clone(),
+                        0.1f32,
+                    ),
+                    end_point(
+                        hex,
+                        cursor_position.to_array(),
+                        extended_bounds.clone(),
+                        -0.1f32,
+                    ),
+                ];
+
+                let draw = DrawMode::Outlined {
+                    fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.3)),
+                    outline_mode: StrokeMode::new(
+                        Color::rgba(0., 0., 0., 0.3),
+                        HexGrid::<HexItem>::LINE_WIDTH,
+                    ),
+                };
+                let transform = Transform {
+                    translation: Vec3::new(0f32, 0f32, 2f32),
+                    ..Default::default()
+                };
+                let mut lines = points
+                    .into_iter()
+                    .map(|p| {
+                        commands
+                            .spawn_bundle(GeometryBuilder::build_as(
+                                &bevy_prototype_lyon::shapes::Line(Vec2::from(hex), Vec2::from(p)),
+                                draw.clone(),
+                                transform.clone(),
+                            ))
+                            .id()
+                    })
+                    .collect::<Vec<_>>();
+                lines.push(
+                    commands
+                        .spawn_bundle(GeometryBuilder::build_as(
+                            &bevy_prototype_lyon::shapes::Line(Vec2::from(hex), Vec2::from(center)),
+                            DrawMode::Outlined {
+                                fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.1)),
+                                outline_mode: StrokeMode::new(
+                                    Color::rgba(0., 0., 0., 0.1),
+                                    HexGrid::<HexItem>::LINE_WIDTH,
+                                ),
+                            },
+                            transform.clone(),
+                        ))
+                        .id(),
+                );
+                let unit = unit_query.get(hex_grid[selected].entity()).unwrap();
+                let firing_accuracy_text = commands
+                    .spawn_bundle(Text2dBundle {
+                        text: Text::with_section(
+                            format!(
+                                "{:.0}% {:.0}% {:.0}%",
+                                unit.firing_buckets[0] * 100f32,
+                                unit.firing_buckets[1] * 100f32,
+                                unit.firing_buckets[2] * 100f32
+                            ),
+                            TextStyle {
+                                font: asset_server.load("SmoochSans-Bold.ttf"),
+                                font_size: 40.0,
+                                color: Color::RED,
+                            },
+                            TextAlignment {
+                                vertical: VerticalAlign::Center,
+                                horizontal: HorizontalAlign::Center,
+                            },
+                        ),
+                        transform: Transform {
+                            translation: Vec3::new(hex[0], hex[1] + 50f32, 10f32),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .id();
+                lines.push(firing_accuracy_text);
+                firing_line.0 = lines;
+            }
         }
     }
-    
 }
 fn angle_between_two_points([ax, ay]: [f32; 2], [bx, by]: [f32; 2]) -> f32 {
-    let delta_x = ax-bx;
-    let delta_y = ay-by;
+    let delta_x = ax - bx;
+    let delta_y = ay - by;
     let radians = delta_y.atan2(delta_x);
     radians
 }
 fn cartesian_distance([ax, ay]: [f32; 2], [bx, by]: [f32; 2]) -> f32 {
     ((ax as f32 - bx as f32).powi(2) + (ay as f32 - by as f32).powi(2)).sqrt()
+}
+/// Returns a point on line from `a` through `c` (where `c` is `b` rotated about `a` by `theta` radians) that lies on the `bounds`.
+///
+/// https://www.desmos.com/calculator/zdzfdwsjxa
+fn end_point(
+    [ax, ay]: [f32; 2],
+    [bx, by]: [f32; 2],
+    [x, y]: [std::ops::Range<f32>; 2],
+    theta: f32,
+) -> [f32; 2] {
+    let d = ((by - ay) / (bx - ax)).atan();
+    let rad = (d + theta).tan();
+    let fx = |x: f32| -> f32 { (rad * (x - ax)) + ay };
+    let fy = |y: f32| -> f32 { ((y - ay) / rad) + ax };
+    let [cx, cy] = rotate_point_around_point([ax, ay], [bx, by], theta);
+    // println!(
+    //     "{:?}->{:?} rotated by {:.3} gives {:?}",
+    //     [ax, ay],[bx, by],theta,[cy,cx]
+    // );
+    match (cy > ay, cx > ax) {
+        // Upper left quadrant
+        (true, true) => [min(fy(y.end), x.end), min(y.end, fx(x.end))],
+        // Lower left quadrant
+        (false, true) => [min(fy(y.start), x.end), max(y.start, fx(x.end))],
+        // Lower right quadrant
+        (false, false) => [max(fy(y.start), x.start), max(y.start, fx(x.start))],
+        // Upper right quadrant
+        (true, false) => [max(fy(y.end), x.start), min(y.end, fx(x.start))],
+    }
+}
+/// Rotates a given point `b` around a given point `a` by a some number of radians `theta`
+fn rotate_point_around_point([ax, ay]: [f32; 2], [bx, by]: [f32; 2], theta: f32) -> [f32; 2] {
+    let dx = bx - ax;
+    let dy = by - ay;
+    [
+        dx * theta.cos() - dy * theta.sin() + ax,
+        dx * theta.sin() + dy * theta.cos() + ay,
+    ]
+}
+// std::cmp::max supporting f32
+fn max(a: f32, b: f32) -> f32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+// std::cmp::min supporting f32
+fn min(a: f32, b: f32) -> f32 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+// Returns the probability of sampling ranges of values from a distribution
+// The buckets being:
+// - -0.02..0.02
+// - -0.1..-0.02 & 0.02..0.1
+// - ..-0.1 & 0.1..
+fn buckets<D: rand_distr::Distribution<f32>>(dist: D, samples: usize) -> [f32; 3] {
+    let mut buckets = [0; 3];
+    for sample in dist.sample_iter(rand::thread_rng()).take(samples) {
+        if sample < -0.1 || sample > 0.1 {
+            buckets[2] += 1;
+        } else if sample < -0.02 || sample > 0.02 {
+            buckets[1] += 1;
+        } else {
+            buckets[0] += 1;
+        }
+    }
+    [
+        buckets[0] as f32 / samples as f32,
+        buckets[1] as f32 / samples as f32,
+        buckets[2] as f32 / samples as f32,
+    ]
 }
