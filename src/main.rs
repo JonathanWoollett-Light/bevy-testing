@@ -462,27 +462,30 @@ fn hover_system<const HIGHLIGHT_COLOR: [u8; 4]>(
     let hex_grid = hex_grid.into_inner();
     for _ in cursor_evr.iter() {
         let window = windows.get_primary().expect("no primary window");
-        let cursor_position = window.cursor_position().expect("No cursor position")
-            - Vec2::new(window.width() / 2., window.height() / 2.);
-        // print!("{}",cursor_position);
+        if let Some(cursor_position) = window.cursor_position() {
+            let cursor_position = cursor_position
+                - Vec2::new(window.width() / 2., window.height() / 2.);
+            // print!("{}",cursor_position);
 
-        // TODO Here we skip our 1st camera (the ui camera) do this better
-        let (camera_transform, _) = camera_query.iter().nth(1).unwrap();
-        let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
-        // println!("cursor_position: {:?}", cursor_position);
+            // TODO Here we skip our 1st camera (the ui camera) do this better
+            let (camera_transform, _) = camera_query.iter().nth(1).unwrap();
+            let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
+            // println!("cursor_position: {:?}", cursor_position);
 
-        let indices = hex_grid.indices(cursor_position.to_array());
-        // println!("hover: {:?}",indices);
-        match indices {
-            // If both logical pixel coordinates can be mapped to hexes within our hex grid
-            Some([x, y]) => {
-                hex_grid.highlight_cell::<HIGHLIGHT_COLOR>(&mut commands, [x, y]);
-            }
-            // If either logical pixel coordinates are outside our hex grid
-            _ => {
-                hex_grid.remove_highlight::<HIGHLIGHT_COLOR>(&mut commands);
+            let indices = hex_grid.indices(cursor_position.to_array());
+            // println!("hover: {:?}",indices);
+            match indices {
+                // If both logical pixel coordinates can be mapped to hexes within our hex grid
+                Some([x, y]) => {
+                    hex_grid.highlight_cell::<HIGHLIGHT_COLOR>(&mut commands, [x, y]);
+                }
+                // If either logical pixel coordinates are outside our hex grid
+                _ => {
+                    hex_grid.remove_highlight::<HIGHLIGHT_COLOR>(&mut commands);
+                }
             }
         }
+        
     }
 }
 
@@ -634,7 +637,7 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
                         }
                         firing_line.0 = Vec::new();
 
-                        audio.set_volume(0.2);
+                        audio.set_volume(0.1);
                         audio.play(asset_server.load("PM_FN_Spawns_Portals_Teleports_5.mp3"));
                     } else {
                         println!("Cannot move: Outside unit's remaining movement points.");
@@ -932,7 +935,7 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
                             match hex_grid[hex] {
                                 HexItem::Empty => { continue; },
                                 HexItem::Entity(entity) => {
-                                    audio.set_volume(0.5);
+                                    audio.set_volume(0.2);
                                     audio.play(asset_server.load("zapsplat_multimedia_game_sound_monster_hit_impact_kill_warp_weird_78163.mp3"));
                                     // TODO: Do better death animation
                                     // Removes hit entity
@@ -1017,7 +1020,7 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
                         from, 
                         to
                     });
-                    audio.set_volume(0.3);
+                    audio.set_volume(0.2);
                     audio.play(asset_server.load("cartoon_anime_burst_laser_beam_energy_fast_hard_71598.mp3"));
                     unit.fired = true;
                 }
