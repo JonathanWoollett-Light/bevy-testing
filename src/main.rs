@@ -2,6 +2,7 @@
 #![feature(adt_const_params)]
 use bevy::{input::mouse::MouseScrollUnit, prelude::*};
 use bevy_prototype_lyon::prelude::*;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 fn main() {
     App::new()
@@ -210,33 +211,43 @@ impl HexGrid<HexItem> {
         [xs..xe, ys..ye]
     }
     const UNIT_SIZE: f32 = 20f32;
-    fn add_component(
-        &mut self,
-        commands: &mut Commands,
-        component: impl Component,
-        index: [usize; 2],
-    ) {
+    fn add_unit(&mut self, commands: &mut Commands, component: Unit, index: [usize; 2]) {
         let [x, y] = self.logical_pixel_coordinates(index);
-        let mut new_entity_commands = commands.spawn_bundle(SpriteBundle {
-            transform: Transform {
-                translation: Vec3::from((x, y, 0f32)),
-                scale: Vec3::new(Self::UNIT_SIZE, Self::UNIT_SIZE, 0.),
+        let new_entity = commands
+            .spawn_bundle(SpriteBundle {
+                transform: Transform {
+                    translation: Vec3::from((x, y, 0f32)),
+                    scale: Vec3::new(Self::UNIT_SIZE, Self::UNIT_SIZE, 0.),
+                    ..Default::default()
+                },
+                sprite: Sprite {
+                    color: Color::rgb(1., 1., 1.),
+                    ..Default::default()
+                },
                 ..Default::default()
+            })
+            .insert(component)
+            .id();
+        self[index] = HexItem::Entity(new_entity);
+    }
+    fn add_obstruction(&mut self, commands: &mut Commands, index: [usize; 2]) {
+        let [x, y] = self.logical_pixel_coordinates(index);
+        commands.spawn_bundle(GeometryBuilder::build_as(
+            &bevy_prototype_lyon::shapes::RegularPolygon {
+                sides: 6,
+                center: Vec2::new(x, y),
+                feature: RegularPolygonFeature::SideLength(HexGrid::<HexItem>::SIDE_LENGTH),
             },
-            sprite: Sprite {
-                color: Color::rgb(1., 1., 1.),
-                ..Default::default()
+            DrawMode::Outlined {
+                fill_mode: FillMode::color(Color::rgba(1., 1., 1., 1.)),
+                outline_mode: StrokeMode::new(
+                    Color::rgba(1., 1., 1., 1.),
+                    HexGrid::<HexItem>::LINE_WIDTH,
+                ),
             },
-            ..Default::default()
-        });
-        let new_entity = new_entity_commands.id();
-        new_entity_commands.insert(component);
-        match self.get_mut(index) {
-            Some(x) => {
-                *x = HexItem::Entity(new_entity);
-            }
-            None => unreachable!(),
-        }
+            Transform::default(),
+        ));
+        self[index] = HexItem::Obstruction;
     }
     /// Gets indices from logical pixel coordinates.
     fn indices(&self, [x, y]: [f32; 2]) -> Option<[usize; 2]> {
@@ -308,11 +319,6 @@ impl HexGrid<HexItem> {
         fringes
     }
 }
-// impl From<&HexGrid<HexItem>> for HexGrid<bool> {
-//     fn from(a: &HexGrid<HexItem>) -> Self {
-//         HexGrid::new(a.width,a.height)
-//     }
-// }
 
 #[derive(Debug, Copy, Clone)]
 enum HexItem {
@@ -346,6 +352,13 @@ fn setup(mut commands: Commands) {
     let grid_width = 39;
 
     let mut hex_grid = HexGrid::new(grid_width, grid_height);
+    // Adds some obstructions
+    let map: Vec<[usize; 2]> =
+        serde_json::from_str(&std::fs::read_to_string("map.json").unwrap()).unwrap();
+    for hex in map.into_iter() {
+        hex_grid.add_obstruction(&mut commands, hex);
+    }
+
     hex_grid.render::<0.1f32>(&mut commands);
 
     let units = vec![
@@ -357,27 +370,37 @@ fn setup(mut commands: Commands) {
 
     commands.insert_resource(SelectedUnitOption::default());
     commands.insert_resource(FiringLines::default());
+    commands.insert_resource(FiringPath::default());
 
     // Add units
     // ----------------------------------------------------
 
     for (unit, index) in units.into_iter() {
-        hex_grid.add_component(&mut commands, unit, index);
+        hex_grid.add_unit(&mut commands, unit, index);
     }
     commands.insert_resource(hex_grid);
 }
 #[derive(Default, Debug)]
 struct FiringLines(Vec<Entity>);
 #[derive(Default, Debug)]
+struct FiringPath(Vec<Entity>);
+#[derive(Default, Debug)]
 struct SelectedUnitOption(Option<[usize; 2]>);
 #[derive(Component, Debug)]
 struct Unit {
+    // Percentage of samples from `firing_distribution` that sit within the buckets of [-0.02..0.02,(-1..-0.02 & 0.02..1),(..-1 & 1..)]
     firing_buckets: [f32; 3],
+    // Distribution from which we sample our firing inaccuracies.
     firing_distribution: rand_distr::Normal<f32>,
+    // Has this unit fired this turn?
+    fired: bool,
     // Distances to all reachable points from current position.
     distances: HashMap<[usize; 2], usize>,
+    // Entities highlighting movement range.
     movement_range: Vec<Entity>,
+    // Remaining movement this unit has this turn.
     movement: u8,
+    // Movement unit gets each turn.
     maximum_movement: u8,
 }
 impl Unit {
@@ -390,6 +413,7 @@ impl Unit {
         Self {
             firing_buckets: buckets(firing_distribution, Self::SAMPLES),
             firing_distribution,
+            fired: false,
             distances: HashMap::new(),
             movement_range: Vec::new(),
             maximum_movement,
@@ -447,6 +471,7 @@ fn turnover_system(
     if keys.just_pressed(KeyCode::Space) {
         query.for_each_mut(|mut f| {
             f.movement = f.maximum_movement;
+            f.fired = false;
         });
         // Since we may be changing the movement of a selected unit we need to update the movement range of this unit
         if let Some(selected) = selected_entity.0 {
@@ -771,19 +796,112 @@ fn camera_movement_system<const MIN_ZOOM: f32, const MAX_ZOOM: f32>(
         }
     }
 }
-
+use rand_distr::Distribution;
 fn firing_system(
     selected_entity: ResMut<SelectedUnitOption>,
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>)>,
-    unit_query: Query<(&Unit)>,
+    mut unit_query: Query<(&mut Unit)>,
     windows: Res<Windows>,
     hex_grid: Res<HexGrid<HexItem>>,
     mut commands: Commands,
     firing_line: ResMut<FiringLines>,
+    firing_path: ResMut<FiringPath>,
     mut cursor_evr: EventReader<CursorMoved>,
     asset_server: Res<AssetServer>,
+    keys: Res<Input<KeyCode>>,
 ) {
     let firing_line = firing_line.into_inner();
+    // TODO This hit detection super janky, make it better.
+    // If user pressed f key
+    if keys.just_pressed(KeyCode::F) {
+        let window = windows.get_primary().expect("no primary window");
+        if let Some(cursor_position) = window.cursor_position() {
+            let cursor_position =
+                cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
+            let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
+            let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
+
+
+            if let Some(selected) = selected_entity.0 {
+                let unit = unit_query.get_mut(hex_grid[selected].entity()).unwrap().into_inner();
+                // If unit hasn't already fired this turn
+                if !unit.fired {
+                    let theta = unit.firing_distribution.sample(&mut rand::thread_rng());
+
+                    let [ax, ay] = hex_grid.logical_pixel_coordinates(selected);
+                    let [bx, by] = cursor_position.to_array();
+                    let [cx, cy] = rotate_point_around_point([ax, ay], [bx, by], theta);
+                    let steps = 100;
+                    let vector = Vec2::from([cx - ax, cy - ay]) / steps as f32;
+
+                    let firing_path = firing_path.into_inner();
+                    // Removes old firing path
+                    for path in firing_path.0.iter() {
+                        commands.entity(*path).despawn();
+                    }
+                    firing_path.0 = Vec::new();
+                    // Add new firing path
+                    let mut current = Vec2::from([ax, ay]);
+
+                    // TODO We really only need to calculate distance(a,c) points. Do this instead (like https://www.redblobgames.com/grids/hexagons/#line-drawing).
+                    let mut hex_path = BTreeSet::new();
+                    let mut collision = None;
+                    loop {
+                        current += vector;
+                        // If indexes within grid can be given
+                        if let Some(hex) = hex_grid.indices(current.to_array()) {
+                            if hex == selected {
+                                continue;
+                            }
+                            // If hex outside grid
+                            if !hex_grid.contains_index(hex) {
+                                break;
+                            }
+                            hex_path.insert(hex);
+                            if !hex_grid[hex].is_empty() {
+                                collision = Some(current.to_array());
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
+                    println!("collision: {:.2?}", collision);
+
+                    // Adds sprites
+                    firing_path.0 = hex_path
+                        .into_iter()
+                        .map(|hex| {
+                            let hex_coords = hex_grid.logical_pixel_coordinates(hex);
+                            commands
+                                .spawn_bundle(GeometryBuilder::build_as(
+                                    &bevy_prototype_lyon::shapes::RegularPolygon {
+                                        sides: 6,
+                                        center: Vec2::from(hex_coords),
+                                        feature: RegularPolygonFeature::SideLength(
+                                            HexGrid::<HexItem>::SIDE_LENGTH,
+                                        ),
+                                    },
+                                    DrawMode::Outlined {
+                                        fill_mode: FillMode::color(Color::rgba(1., 1., 1., 0.2)),
+                                        outline_mode: StrokeMode::new(
+                                            Color::rgba(1., 1., 1., 0.2),
+                                            HexGrid::<HexItem>::LINE_WIDTH,
+                                        ),
+                                    },
+                                    Transform::default(),
+                                ))
+                                .id()
+                        })
+                        .collect::<Vec<_>>();
+
+                    unit.fired = true;
+                }
+                
+            }
+        }
+    }
     // TODO Use cursor position from `_ev` instead of `window`.
     for _ev in cursor_evr.iter() {
         // println!(

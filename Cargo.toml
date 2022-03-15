@@ -13,3 +13,6 @@ itertools = "0.10.3"
 # image = "0.24.1"
 rand = "0.8.5"
 rand_distr = "0.4.3"
+# Map loading
+serde = "1.0.136"
+serde_json = "1.0.79"
