@@ -4,17 +4,20 @@ use bevy::{input::mouse::MouseScrollUnit, prelude::*};
 use bevy_prototype_lyon::prelude::*;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+use bevy_kira_audio::{AudioPlugin,Audio};
+const LASER_COLOUR: [f32;3] = [1f32,0f32,0f32];
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::rgb(0., 0., 0.)))
         .add_plugins(DefaultPlugins)
         .add_plugin(ShapePlugin)
+        .add_plugin(AudioPlugin)
         .add_startup_system(setup)
         .add_system(unit_movement_system::<{ [0, 0, 255, 50] }>)
         .add_system(camera_movement_system::<1f32, 5f32>)
         .add_system(hover_system::<{ [255, 255, 255, 127] }>)
         .add_system(turnover_system)
-        .add_system(firing_system)
+        .add_system(firing_system::<LASER_COLOUR,4f32,0.05f32,1f32,0.05f32>)
         .run();
 }
 use std::collections::HashMap;
@@ -346,6 +349,8 @@ fn setup(mut commands: Commands) {
     // cameras
     commands.spawn_bundle(OrthographicCameraBundle::new_2d());
     commands.spawn_bundle(UiCameraBundle::default());
+    // Shoots remain on screen for 0.5 seconds
+    commands.insert_resource(Lasers::<LASER_COLOUR>::default());
 
     // Background
     let grid_height = 20;
@@ -380,6 +385,31 @@ fn setup(mut commands: Commands) {
     }
     commands.insert_resource(hex_grid);
 }
+// The list of all lasers present on screen and a timer for how long to wait until deleting the entity.
+#[derive(Debug,Default)]
+struct Lasers<const COLOUR:[f32;3]>(Vec<Laser<COLOUR>>);
+#[derive(Debug,Clone)]
+struct Laser<const COLOUR:[f32;3]> {
+    entity: Entity,
+    opacity: f32,
+    // Opacity decay every tick
+    decay: f32,
+    timer: Timer,
+    from: Vec2,
+    to: Vec2
+}
+impl<const COLOUR:[f32;3]> std::ops::Deref for Lasers<COLOUR> {
+    type Target = Vec<Laser<COLOUR>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl<const COLOUR:[f32;3]> std::ops::DerefMut for Lasers<COLOUR> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 #[derive(Default, Debug)]
 struct FiringLines(Vec<Entity>);
 #[derive(Default, Debug)]
@@ -486,7 +516,7 @@ fn turnover_system(
                 &mut commands,
                 selected,
                 &hex_grid,
-                asset_server,
+                &asset_server,
             );
         }
     }
@@ -503,6 +533,7 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>)>,
     asset_server: Res<AssetServer>,
     firing_line: ResMut<FiringLines>,
+    audio: Res<Audio>
 ) {
     let window = windows.get_primary().expect("no primary window");
     // Right click de-selects unit if a unit is selected
@@ -595,13 +626,16 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
 
                         // Movement range
                         clear_reachable(unit, &mut commands);
-                        render_reachable(unit, &mut commands, indices, hex_grid, asset_server);
+                        render_reachable(unit, &mut commands, indices, hex_grid, &asset_server);
                         // Removes old firing lines
 
                         for line in firing_line.0.iter() {
                             commands.entity(*line).despawn();
                         }
                         firing_line.0 = Vec::new();
+
+                        audio.set_volume(0.2);
+                        audio.play(asset_server.load("PM_FN_Spawns_Portals_Teleports_5.mp3"));
                     } else {
                         println!("Cannot move: Outside unit's remaining movement points.");
                     }
@@ -629,7 +663,7 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
                         &mut commands,
                         indices,
                         hex_grid,
-                        asset_server,
+                        &asset_server,
                     );
                     // Set new selected entity.
                     selected_entity.0 = Some(indices);
@@ -656,7 +690,7 @@ fn render_reachable(
     commands: &mut Commands,
     hex: [usize; 2],
     hex_grid: &HexGrid<HexItem>,
-    asset_server: Res<AssetServer>,
+    asset_server: &AssetServer,
 ) {
     // Gets reachable positions
     let fringes = hex_grid.reachable(hex, new_unit.movement as usize);
@@ -797,20 +831,64 @@ fn camera_movement_system<const MIN_ZOOM: f32, const MAX_ZOOM: f32>(
     }
 }
 use rand_distr::Distribution;
-fn firing_system(
+fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECONDS:f32,const SHOT_OPACITY: f32, const SHOT_DECAY:f32>(
+    time: Res<Time>,
     selected_entity: ResMut<SelectedUnitOption>,
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>)>,
     mut unit_query: Query<(&mut Unit)>,
     windows: Res<Windows>,
-    hex_grid: Res<HexGrid<HexItem>>,
+    hex_grid: ResMut<HexGrid<HexItem>>,
     mut commands: Commands,
     firing_line: ResMut<FiringLines>,
     firing_path: ResMut<FiringPath>,
     mut cursor_evr: EventReader<CursorMoved>,
     asset_server: Res<AssetServer>,
     keys: Res<Input<KeyCode>>,
+    lasers: ResMut<Lasers<SHOT_COLOUR>>,
+    audio: Res<Audio>
 ) {
     let firing_line = firing_line.into_inner();
+    let hex_grid = hex_grid.into_inner();
+    // Checks timer on all rendered lasers on whether to remove them
+    let lasers = lasers.into_inner();
+    lasers.0 = lasers.iter().cloned().filter_map(|mut laser|{
+        // Ticks timer and checks if finished
+        // println!("laser.timer.elapsed(): {:?}, {}",laser.timer.elapsed(),laser.timer.finished());
+        if laser.timer.tick(time.delta()).just_finished() {
+            // Removes old entity
+            commands.entity(laser.entity).despawn();
+            // println!("{} > {}",laser.decay,laser.opacity);
+            if laser.decay > laser.opacity {
+                None
+            }
+            else {
+                laser.opacity -= laser.decay;
+                // Renders new entity
+                let shot_colour = Color::rgba(SHOT_COLOUR[0],SHOT_COLOUR[1],SHOT_COLOUR[2],laser.opacity);
+                laser.entity = commands
+                    .spawn_bundle(GeometryBuilder::build_as(
+                        &bevy_prototype_lyon::shapes::Line(laser.from, laser.to),
+                        DrawMode::Outlined {
+                            fill_mode: FillMode::color(shot_colour),
+                            outline_mode: StrokeMode::new(
+                                shot_colour,
+                                SHOT_WIDTH,
+                            ),
+                        },
+                        Transform {
+                            translation: Vec3::new(0f32, 0f32, 3f32),
+                            ..Default::default()
+                        },
+                    ))
+                    .id();
+                Some(laser)
+            }
+        }
+        else {
+            Some(laser)
+        }
+    }).collect::<Vec<_>>();
+    
     // TODO This hit detection super janky, make it better.
     // If user pressed f key
     if keys.just_pressed(KeyCode::F) {
@@ -820,7 +898,6 @@ fn firing_system(
                 cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
             let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
             let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
-
 
             if let Some(selected) = selected_entity.0 {
                 let unit = unit_query.get_mut(hex_grid[selected].entity()).unwrap().into_inner();
@@ -834,18 +911,11 @@ fn firing_system(
                     let steps = 100;
                     let vector = Vec2::from([cx - ax, cy - ay]) / steps as f32;
 
-                    let firing_path = firing_path.into_inner();
-                    // Removes old firing path
-                    for path in firing_path.0.iter() {
-                        commands.entity(*path).despawn();
-                    }
-                    firing_path.0 = Vec::new();
-                    // Add new firing path
+                    
+                    // Calculates new firing path
                     let mut current = Vec2::from([ax, ay]);
-
                     // TODO We really only need to calculate distance(a,c) points. Do this instead (like https://www.redblobgames.com/grids/hexagons/#line-drawing).
                     let mut hex_path = BTreeSet::new();
-                    let mut collision = None;
                     loop {
                         current += vector;
                         // If indexes within grid can be given
@@ -858,44 +928,97 @@ fn firing_system(
                                 break;
                             }
                             hex_path.insert(hex);
-                            if !hex_grid[hex].is_empty() {
-                                collision = Some(current.to_array());
-                                break;
+                            
+                            match hex_grid[hex] {
+                                HexItem::Empty => { continue; },
+                                HexItem::Entity(entity) => {
+                                    audio.set_volume(0.5);
+                                    audio.play(asset_server.load("zapsplat_multimedia_game_sound_monster_hit_impact_kill_warp_weird_78163.mp3"));
+                                    // TODO: Do better death animation
+                                    // Removes hit entity
+                                    hex_grid[hex] = HexItem::Empty;
+                                    commands.entity(entity).despawn();
+
+                                    break;
+                                },
+                                HexItem::Obstruction => {
+                                    break;
+                                }
                             }
                         } else {
                             break;
                         }
                     }
 
-                    println!("collision: {:.2?}", collision);
+                    // println!("collision: {:.2?}", collision);
+                    // Only draw firing path hexes in debug
+                    #[cfg(debug_assertions)]
+                    {
+                        let firing_path = firing_path.into_inner();
+                        // Removes old firing path
+                        for path in firing_path.0.iter() {
+                            commands.entity(*path).despawn();
+                        }
+                        firing_path.0 = Vec::new();
+                        // Adds firing path sprites
+                        firing_path.0 = hex_path
+                            .into_iter()
+                            .map(|hex| {
+                                let hex_coords = hex_grid.logical_pixel_coordinates(hex);
+                                commands
+                                    .spawn_bundle(GeometryBuilder::build_as(
+                                        &bevy_prototype_lyon::shapes::RegularPolygon {
+                                            sides: 6,
+                                            center: Vec2::from(hex_coords),
+                                            feature: RegularPolygonFeature::SideLength(
+                                                HexGrid::<HexItem>::SIDE_LENGTH,
+                                            ),
+                                        },
+                                        DrawMode::Outlined {
+                                            fill_mode: FillMode::color(Color::rgba(1., 1., 1., 0.2)),
+                                            outline_mode: StrokeMode::new(
+                                                Color::rgba(1., 1., 1., 0.2),
+                                                HexGrid::<HexItem>::LINE_WIDTH,
+                                            ),
+                                        },
+                                        Transform::default(),
+                                    ))
+                                    .id()
+                            })
+                            .collect::<Vec<_>>();
+                    }
+                    
 
-                    // Adds sprites
-                    firing_path.0 = hex_path
-                        .into_iter()
-                        .map(|hex| {
-                            let hex_coords = hex_grid.logical_pixel_coordinates(hex);
-                            commands
-                                .spawn_bundle(GeometryBuilder::build_as(
-                                    &bevy_prototype_lyon::shapes::RegularPolygon {
-                                        sides: 6,
-                                        center: Vec2::from(hex_coords),
-                                        feature: RegularPolygonFeature::SideLength(
-                                            HexGrid::<HexItem>::SIDE_LENGTH,
-                                        ),
-                                    },
-                                    DrawMode::Outlined {
-                                        fill_mode: FillMode::color(Color::rgba(1., 1., 1., 0.2)),
-                                        outline_mode: StrokeMode::new(
-                                            Color::rgba(1., 1., 1., 0.2),
-                                            HexGrid::<HexItem>::LINE_WIDTH,
-                                        ),
-                                    },
-                                    Transform::default(),
-                                ))
-                                .id()
-                        })
-                        .collect::<Vec<_>>();
 
+                    // Draws shot (since I don't want to handle animation a bullet, its a laser which appears for a couple frames)
+                    let shot_colour = Color::rgba(SHOT_COLOUR[0],SHOT_COLOUR[1],SHOT_COLOUR[2],SHOT_OPACITY);
+                    let from = Vec2::from([ax, ay]);
+                    let to = current;
+                    lasers.push(Laser {
+                        entity:commands
+                        .spawn_bundle(GeometryBuilder::build_as(
+                            &bevy_prototype_lyon::shapes::Line(from,to),
+                            DrawMode::Outlined {
+                                fill_mode: FillMode::color(shot_colour),
+                                outline_mode: StrokeMode::new(
+                                    shot_colour,
+                                    SHOT_WIDTH,
+                                ),
+                            },
+                            Transform {
+                                translation: Vec3::new(0f32, 0f32, 3f32),
+                                ..Default::default()
+                            },
+                        ))
+                        .id(),
+                        decay: SHOT_DECAY,
+                        opacity: SHOT_OPACITY,
+                        timer: Timer::from_seconds(SHOT_SECONDS,true),
+                        from, 
+                        to
+                    });
+                    audio.set_volume(0.3);
+                    audio.play(asset_server.load("cartoon_anime_burst_laser_beam_energy_fast_hard_71598.mp3"));
                     unit.fired = true;
                 }
                 
