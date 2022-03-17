@@ -1,34 +1,68 @@
 #![allow(incomplete_features)]
 #![feature(adt_const_params)]
-use bevy::{input::mouse::MouseScrollUnit, prelude::*};
+#![feature(const_fn_floating_point_arithmetic)]
+use bevy::prelude::*;
+use bevy_kira_audio::{Audio, AudioPlugin};
 use bevy_prototype_lyon::prelude::*;
-use std::collections::BTreeSet;
-use std::collections::HashSet;
-use bevy_kira_audio::{AudioPlugin,Audio};
-const LASER_COLOUR: [f32;3] = [1f32,0f32,0f32];
+use rand_distr::Distribution;
+use std::collections::{HashMap, HashSet};
+
+/// Colour of lasers shot by units.
+const LASER_COLOUR: [f32; 3] = [1f32, 0f32, 0f32];
+/// Background colour.
+const BACKGROUND_COLOUR: Color = Color::rgb(0f32, 0f32, 0f32);
+/// Colour highlight on selected units.
+const UNIT_SELECTION_COLOUR: Colour = Colour(Color::rgba(0f32, 0f32, 1f32, 0.2f32));
+/// Minimum camera zoom/scale.
+const MIN_ZOOM: f32 = 1f32;
+/// Maximum camera zoom/scale.
+const MAX_ZOOM: f32 = 5f32;
+/// Colour highlight for hex's the user's cursor is hovering over.
+const HOVER_COLOUR: Colour = Colour(Color::rgba(1f32, 1f32, 1f32, 0.5f32));
+/// The square root of 3 `3^0.5`
+///
+/// Since [`f32::sqrt()`] is not a const fn.
+const SQRT_3: f32 = 1.7320508f32;
+/// Length of 1 side of a hexagon for the hexagons used to form the map.
+const HEX_SIDE_LENGTH: f32 = 30f32;
+/// Width of outline used for the hexagons used to form the map.
+const HEX_OUTLINE_WIDTH: f32 = 3f32;
+/// Width of hexagons used to form the map.
+const HEX_WIDTH: f32 = 3f32 * HEX_SIDE_LENGTH / 2f32;
+/// Height of hexagons used to form the map.
+const HEX_HEIGHT: f32 = (SQRT_3 / 2f32) * (HEX_SIDE_LENGTH / 0.5f32);
+/// Colour of hexagons used to form the map.
+const HEX_COLOR: Color = Color::rgba(1f32, 1f32, 1f32, 0.3f32);
+/// Colour of outline of hexagons used to form the map.
+const HEX_OUTLINE_COLOR: Color = Color::rgba(0f32, 0f32, 0f32, 0.1f32);
+/// Size of player units.
+const UNIT_SIZE: f32 = 30f32;
+
 fn main() {
     App::new()
-        .insert_resource(ClearColor(Color::rgb(0., 0., 0.)))
+        .insert_resource(ClearColor(BACKGROUND_COLOUR))
         .add_plugins(DefaultPlugins)
         .add_plugin(ShapePlugin)
         .add_plugin(AudioPlugin)
         .add_startup_system(setup)
-        .add_system(unit_movement_system::<{ [0, 0, 255, 50] }>)
-        .add_system(camera_movement_system::<1f32, 5f32>)
-        .add_system(hover_system::<{ [255, 255, 255, 127] }>)
+        .add_system(unit_movement_system)
+        .add_system(camera_movement_system)
+        .add_system(hover_system)
         .add_system(turnover_system)
-        .add_system(firing_system::<LASER_COLOUR,4f32,0.05f32,1f32,0.05f32>)
+        .add_system(firing_system::<LASER_COLOUR, 4f32, 0.05f32, 1f32, 0.05f32>)
         .run();
 }
-use std::collections::HashMap;
 
+/// An hexagon grid.
 #[derive(Debug, Clone)]
 struct HexGrid<T: std::fmt::Debug> {
     data: Vec<T>,
     pub width: usize,
     pub height: usize,
-    /// A mapping of RGBA 0..255 color highlights to their respective entity.
-    highlights: HashMap<[u8; 4], Entity>,
+    /// Logical pixel bounds of hex grid.
+    pub logical_pixel_bounds: [std::ops::Range<f32>; 2],
+    /// A mapping of colour highlights to their respective entity.
+    highlights: HashMap<Colour, Entity>,
 }
 impl<T: std::fmt::Debug + Default + Copy> HexGrid<T> {
     /// `HexGrid::<i32>::new(4,2)` produces:
@@ -41,12 +75,19 @@ impl<T: std::fmt::Debug + Default + Copy> HexGrid<T> {
     ///   ╲_╱ ╲_╱
     /// ```
     fn new(width: usize, height: usize) -> Self {
-        Self {
+        let mut this = Self {
             data: vec![Default::default(); width * height],
             width,
             height,
+            logical_pixel_bounds: Default::default(),
             highlights: HashMap::new(),
-        }
+        };
+        this.logical_pixel_bounds = {
+            let [xs, ys] = this.unchecked_logical_pixels([0, 0]);
+            let [xe, ye] = this.unchecked_logical_pixels([this.width - 1, this.height - 1]);
+            [xs..xe, ys..ye]
+        };
+        this
     }
 }
 impl<T: std::fmt::Debug> std::ops::Index<[usize; 2]> for HexGrid<T> {
@@ -78,11 +119,146 @@ impl<T: std::fmt::Debug> std::ops::IndexMut<[usize; 2]> for HexGrid<T> {
         &mut self.data[y * self.width + x]
     }
 }
+/// A wrapper around [`Color`](https://docs.rs/bevy/latest/bevy/render/color/enum.Color.html) to implement [`std::hash::Hash`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Colour(Color);
+/// While this is not technically true, this is necessary to hash it and be useful.
+impl Eq for Colour {}
+impl std::hash::Hash for Colour {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        icolour(self.0.r()).hash(state);
+        icolour(self.0.g()).hash(state);
+        icolour(self.0.b()).hash(state);
+        icolour(self.0.a()).hash(state);
+    }
+}
+impl From<[f32; 4]> for Colour {
+    fn from(x: [f32; 4]) -> Self {
+        Self(Color::from(x))
+    }
+}
+impl std::ops::Deref for Colour {
+    type Target = Color;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+/// Converts a value in 0..1 to a value in 0..256
+const fn icolour(x: f32) -> Result<u8, &'static str> {
+    // match (0f32..1f32).contains(&x)
+    // Bc below `std::ops::Range::contains` isn't const.
+    match x > 0f32 && x < 1f32 {
+        true => Ok((x * 255f32) as u8),
+        false => Err("Float outside range 0..1"),
+    }
+}
 
 impl<T: std::fmt::Debug> HexGrid<T> {
+    /// Gets logical pixel coordinates of center of hex of a given index, returning `None` if the
+    ///  given coordinates do not correspond to a hex in the grid.
+    fn logical_pixels(&self, index: [usize; 2]) -> Option<[f32; 2]> {
+        if self.contains_index(index) {
+            Some(self.unchecked_logical_pixels(index))
+        } else {
+            None
+        }
+    }
+    /// Gets logical pixel coordinates of center of hex of a given index.
+    fn unchecked_logical_pixels(&self, [x, y]: [usize; 2]) -> [f32; 2] {
+        [
+            -(HEX_WIDTH * self.width as f32 / 2f32) + HEX_WIDTH * x as f32,
+            -(HEX_HEIGHT * self.height as f32 / 2f32)
+                + (HEX_HEIGHT * y as f32)
+                + ((x % 2) as f32 * HEX_HEIGHT / 2f32),
+        ]
+    }
+    /// Gets index of logical pixel coordinates in hex grid, if the the given coordinates are within the grid.
+    fn index(&self, [x, y]: [f32; 2]) -> Option<[usize; 2]> {
+        if self.logical_pixel_bounds[0].contains(&x) && self.logical_pixel_bounds[1].contains(&y) {
+            // Horizontal index
+            let i = ((x + HEX_WIDTH / 2f32) + (HEX_WIDTH * self.width as f32) / 2f32) / HEX_WIDTH;
+            // Vertical index
+            let j = ((HEX_HEIGHT * self.height as f32 / 2f32)
+                - ((i as usize % 2) as f32 * HEX_HEIGHT / 2f32)
+                + (y + HEX_HEIGHT / 2f32))
+                / HEX_HEIGHT;
+            // Since we checked pixel coordinates are within bounds we know index is within range.
+            Some([i as usize, j as usize])
+        } else {
+            None
+        }
+    }
     /// Returns if a given index is within bounds.
     fn contains_index(&self, [x, y]: [usize; 2]) -> bool {
         x < self.width && y < self.height
+    }
+    /// Render background hexagons on grid.
+    fn render(&self, commands: &mut Commands) {
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let [center_x, center_y] = self.logical_pixels([x, y]).unwrap();
+                // println!("[{},{}] -> [{:.1},{:.1}]",x,y,center_x,center_y);
+                commands.spawn_bundle(GeometryBuilder::build_as(
+                    &bevy_prototype_lyon::shapes::RegularPolygon {
+                        sides: 6,
+                        center: Vec2::new(center_x, center_y),
+                        feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
+                    },
+                    DrawMode::Outlined {
+                        fill_mode: FillMode::color(HEX_COLOR),
+                        outline_mode: StrokeMode::new(HEX_OUTLINE_COLOR, HEX_OUTLINE_WIDTH),
+                    },
+                    Transform::default(),
+                ));
+            }
+        }
+    }
+    /// Removes highlight for hex highlighted by `COLOUR` returning whether the highlight was present.
+    fn remove_highlight(&mut self, commands: &mut Commands, colour: Colour) -> bool {
+        // If highlight exists, remove it
+        match self.highlights.remove(&colour) {
+            Some(existing_highlight) => {
+                commands.entity(existing_highlight).despawn();
+                true
+            }
+            None => false,
+        }
+    }
+    /// Highlights specific hex with `COLOUR`.
+    ///
+    /// This function returns:
+    /// - `Ok(true)` If the given hex could be highlighted and an existing highlight was present.
+    /// - `Ok(false)` If the given hex could be highlighted and an existing highlight wasn't present.
+    /// - `Err(str)` If the given hex could not be highlighted (the coordinates where outside the grid).
+    fn highlight_cell(
+        &mut self,
+        commands: &mut Commands,
+        index: [usize; 2],
+        colour: Colour,
+    ) -> Result<bool, &str> {
+        if self.contains_index(index) {
+            // Removes highlight if it exists.
+            let removed = self.remove_highlight(commands, colour);
+
+            let [x, y] = self.logical_pixels(index).unwrap();
+            let highlight = commands.spawn_bundle(GeometryBuilder::build_as(
+                &bevy_prototype_lyon::shapes::RegularPolygon {
+                    sides: 6,
+                    center: Vec2::new(x, y),
+                    feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
+                },
+                DrawMode::Outlined {
+                    fill_mode: FillMode::color(*colour),
+                    outline_mode: StrokeMode::new(*colour, HEX_OUTLINE_WIDTH),
+                },
+                Transform::default(),
+            ));
+            self.highlights.insert(colour, highlight.id());
+            Ok(removed)
+        } else {
+            Err("Hex coordinates given where outside grid thus hex could not be highlighted.")
+        }
     }
     /// Returns a reference to an element returning `None` if the given indices are out of bounds.
     fn get(&self, index: [usize; 2]) -> Option<&T> {
@@ -110,13 +286,6 @@ impl<T: std::fmt::Debug> HexGrid<T> {
     ///
     /// `self.neighbors([2,1])` returns `[Some([3,1]),Some([3,0]),Some([2,0]),Some([1,0]),Some([1,1]),None]`
     /// ```text
-    ///  ___     ___
-    /// ╱0,0╲___╱2,0╲___
-    /// ╲___╱1,0╲___╱3,0╲
-    /// ╱0,1╲___╱2,1╲___╱
-    /// ╲___╱1,1╲___╱3,1╲
-    ///     ╲___╱   ╲___╱
-    ///
     ///       ___     ___     ___     ___
     ///   ___╱1,7╲___╱3,7╲___╱5,7╲___╱7,7╲___
     ///  ╱0,7╲___╱2,7╲___╱4,7╲_2_╱6,7╲___╱8,7╲
@@ -135,6 +304,14 @@ impl<T: std::fmt::Debug> HexGrid<T> {
     ///  ╲___╱1,0╲___╱3,0╲___╱5,0╲___╱7,0╲___╱
     ///  ╱0,0╲___╱2,0╲___╱4,0╲___╱6,0╲___╱8,0╲
     ///  ╲___╱   ╲___╱   ╲___╱   ╲___╱   ╲___╱
+    /// ```
+    /// ```text
+    ///  ___     ___
+    /// ╱0,0╲___╱2,0╲___
+    /// ╲___╱1,0╲___╱3,0╲
+    /// ╱0,1╲___╱2,1╲___╱
+    /// ╲___╱1,1╲___╱3,1╲
+    ///     ╲___╱   ╲___╱
     /// ```
     fn neighbors(&self, [col, row]: [usize; 2]) -> [Option<[usize; 2]>; 6] {
         let [col, row] = [col as isize, row as isize];
@@ -162,65 +339,15 @@ impl<T: std::fmt::Debug> HexGrid<T> {
         self.offset_coord_wrapper(col + group[direction][0], row + group[direction][1])
     }
 }
+
 impl HexGrid<HexItem> {
-    /// 3^0.5
-    const SQRT_3: f32 = 1.7320508;
-    /// sin(2*pi/3)
-    const SIN_2_PI_BY_3: f32 = Self::SQRT_3 / 2f32;
-    /// sin(pi/6)
-    const SIN_PI_BY_6: f32 = 0.5f32;
-    const LINE_WIDTH: f32 = 3f32;
-    const SIDE_LENGTH: f32 = 30f32;
-    const HEIGHT: f32 = Self::SIN_2_PI_BY_3 * (Self::SIDE_LENGTH / Self::SIN_PI_BY_6);
-    const WIDTH: f32 = 3f32 * Self::SIDE_LENGTH / 2f32;
-    /// Render hex grid on screen.
-    fn render<const OPACITY: f32>(&self, commands: &mut Commands) {
-        assert!((0f32..=1f32).contains(&OPACITY));
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let [center_x, center_y] = self.logical_pixel_coordinates([x, y]);
-                // println!("[{},{}] -> [{:.1},{:.1}]",x,y,center_x,center_y);
-                commands.spawn_bundle(GeometryBuilder::build_as(
-                    &bevy_prototype_lyon::shapes::RegularPolygon {
-                        sides: 6,
-                        center: Vec2::new(center_x, center_y),
-                        feature: RegularPolygonFeature::SideLength(Self::SIDE_LENGTH),
-                    },
-                    DrawMode::Outlined {
-                        fill_mode: FillMode::color(Color::rgba(1., 1., 1., 0.3)),
-                        outline_mode: StrokeMode::new(
-                            Color::rgba(0., 0., 0., OPACITY),
-                            Self::LINE_WIDTH,
-                        ),
-                    },
-                    Transform::default(),
-                ));
-            }
-        }
-    }
-    /// Gets logical pixel coordinates of center of hex of a given index.
-    fn logical_pixel_coordinates(&self, [x, y]: [usize; 2]) -> [f32; 2] {
-        [
-            -(Self::WIDTH * self.width as f32 / 2f32) + Self::WIDTH * x as f32,
-            -(Self::HEIGHT * self.height as f32 / 2f32)
-                + (Self::HEIGHT * y as f32)
-                + ((x % 2) as f32 * Self::HEIGHT / 2f32),
-        ]
-    }
-    /// Gets logical pixel bounds of hex grid.
-    fn logical_pixel_bounds(&self) -> [std::ops::Range<f32>; 2] {
-        let [xs, ys] = self.logical_pixel_coordinates([0, 0]);
-        let [xe, ye] = self.logical_pixel_coordinates([self.width - 1, self.height - 1]);
-        [xs..xe, ys..ye]
-    }
-    const UNIT_SIZE: f32 = 20f32;
     fn add_unit(&mut self, commands: &mut Commands, component: Unit, index: [usize; 2]) {
-        let [x, y] = self.logical_pixel_coordinates(index);
+        let [x, y] = self.logical_pixels(index).unwrap();
         let new_entity = commands
             .spawn_bundle(SpriteBundle {
                 transform: Transform {
                     translation: Vec3::from((x, y, 0f32)),
-                    scale: Vec3::new(Self::UNIT_SIZE, Self::UNIT_SIZE, 0.),
+                    scale: Vec3::new(UNIT_SIZE, UNIT_SIZE, 0.),
                     ..Default::default()
                 },
                 sprite: Sprite {
@@ -234,70 +361,22 @@ impl HexGrid<HexItem> {
         self[index] = HexItem::Entity(new_entity);
     }
     fn add_obstruction(&mut self, commands: &mut Commands, index: [usize; 2]) {
-        let [x, y] = self.logical_pixel_coordinates(index);
+        let [x, y] = self.logical_pixels(index).unwrap();
         commands.spawn_bundle(GeometryBuilder::build_as(
             &bevy_prototype_lyon::shapes::RegularPolygon {
                 sides: 6,
                 center: Vec2::new(x, y),
-                feature: RegularPolygonFeature::SideLength(HexGrid::<HexItem>::SIDE_LENGTH),
+                feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
             },
             DrawMode::Outlined {
                 fill_mode: FillMode::color(Color::rgba(1., 1., 1., 1.)),
-                outline_mode: StrokeMode::new(
-                    Color::rgba(1., 1., 1., 1.),
-                    HexGrid::<HexItem>::LINE_WIDTH,
-                ),
+                outline_mode: StrokeMode::new(Color::rgba(1., 1., 1., 1.), HEX_OUTLINE_WIDTH),
             },
             Transform::default(),
         ));
         self[index] = HexItem::Obstruction;
     }
-    /// Gets indices from logical pixel coordinates.
-    fn indices(&self, [x, y]: [f32; 2]) -> Option<[usize; 2]> {
-        let i = ((x + Self::WIDTH / 2f32) + (Self::WIDTH * self.width as f32) / 2f32) / Self::WIDTH;
-        let j = ((Self::HEIGHT * self.height as f32 / 2f32)
-            - ((i as usize % 2) as f32 * Self::HEIGHT / 2f32)
-            + (y + Self::HEIGHT / 2f32))
-            / Self::HEIGHT;
-        // println!("[{:.1},{:.1}]->[{:.1},{:.1}]", x, y, i, j);
-        match i < 0f32 || j < 0f32 {
-            true => None,
-            false => Some([i as usize, j as usize]),
-        }
-    }
-    /// Removes current highlighted cell.
-    fn remove_highlight<const COLOR: [u8; 4]>(&mut self, commands: &mut Commands) {
-        if let Some(existing_highlight) = self.highlights.remove(&COLOR) {
-            commands.entity(existing_highlight).despawn();
-        }
-    }
-    /// Highlights specific hex.
-    fn highlight_cell<const COLOR: [u8; 4]>(&mut self, commands: &mut Commands, index: [usize; 2]) {
-        self.remove_highlight::<COLOR>(commands);
-        if self.contains_index(index) {
-            let [x, y] = self.logical_pixel_coordinates(index);
-            let color = Color::rgba(
-                COLOR[0] as f32 / 255.,
-                COLOR[1] as f32 / 255.,
-                COLOR[2] as f32 / 255.,
-                COLOR[3] as f32 / 255.,
-            );
-            let highlight = commands.spawn_bundle(GeometryBuilder::build_as(
-                &bevy_prototype_lyon::shapes::RegularPolygon {
-                    sides: 6,
-                    center: Vec2::new(x, y),
-                    feature: RegularPolygonFeature::SideLength(Self::SIDE_LENGTH),
-                },
-                DrawMode::Outlined {
-                    fill_mode: FillMode::color(color),
-                    outline_mode: StrokeMode::new(color, Self::LINE_WIDTH),
-                },
-                Transform::default(),
-            ));
-            self.highlights.insert(COLOR, highlight.id());
-        }
-    }
-    /// Returns a 2d vec of reachable indices from the given index (where vec[x][2] denotes the an index reachable in `x` steps).
+    /// Returns a 2d vec of reachable indices from the given index (where `vec[x][2]` denotes the an index reachable in `x` steps).
     fn reachable(&self, start: [usize; 2], movement: usize) -> Vec<Vec<[usize; 2]>> {
         let mut visited = HashSet::new();
         visited.insert(start);
@@ -323,6 +402,14 @@ impl HexGrid<HexItem> {
     }
 }
 
+/// A description of the map.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct MapDescriptor {
+    obstacles: Vec<[usize; 2]>,
+    player_spawns: Vec<[usize; 2]>,
+    enemy_spawns: Vec<[usize; 2]>,
+}
+/// The data we store associated with each tile of the hex grid.
 #[derive(Debug, Copy, Clone)]
 enum HexItem {
     Entity(Entity),
@@ -345,6 +432,7 @@ impl Default for HexItem {
         Self::Empty
     }
 }
+/// Sets up initial system state.
 fn setup(mut commands: Commands) {
     // cameras
     commands.spawn_bundle(OrthographicCameraBundle::new_2d());
@@ -358,23 +446,23 @@ fn setup(mut commands: Commands) {
 
     let mut hex_grid = HexGrid::new(grid_width, grid_height);
     // Adds some obstructions
-    let map: Vec<[usize; 2]> =
+    let map: MapDescriptor =
         serde_json::from_str(&std::fs::read_to_string("map.json").unwrap()).unwrap();
-    for hex in map.into_iter() {
+    for hex in map.obstacles.into_iter() {
         hex_grid.add_obstruction(&mut commands, hex);
     }
 
-    hex_grid.render::<0.1f32>(&mut commands);
+    hex_grid.render(&mut commands);
 
-    let units = vec![
-        (Unit::new(1), [1, 1]),
-        (Unit::new(2), [2, 2]),
-        (Unit::new(3), [3, 3]),
-        (Unit::new(4), [4, 4]),
-    ];
+    let units = map
+        .player_spawns
+        .into_iter()
+        .map(|hex| (Unit::default(), hex))
+        .collect::<Vec<_>>();
 
     commands.insert_resource(SelectedUnitOption::default());
     commands.insert_resource(FiringLines::default());
+    #[cfg(debug_assertions)]
     commands.insert_resource(FiringPath::default());
 
     // Add units
@@ -385,86 +473,92 @@ fn setup(mut commands: Commands) {
     }
     commands.insert_resource(hex_grid);
 }
-// The list of all lasers present on screen and a timer for how long to wait until deleting the entity.
-#[derive(Debug,Default)]
-struct Lasers<const COLOUR:[f32;3]>(Vec<Laser<COLOUR>>);
-#[derive(Debug,Clone)]
-struct Laser<const COLOUR:[f32;3]> {
+/// The list of all [`Laser`]s present on screen.
+#[derive(Debug, Default)]
+struct Lasers<const COLOUR: [f32; 3]>(Vec<Laser<COLOUR>>);
+/// Data associated with a laser projectile after being fired by a unit.
+#[derive(Debug, Clone)]
+struct Laser<const COLOUR: [f32; 3]> {
     entity: Entity,
     opacity: f32,
     // Opacity decay every tick
     decay: f32,
     timer: Timer,
     from: Vec2,
-    to: Vec2
+    to: Vec2,
 }
-impl<const COLOUR:[f32;3]> std::ops::Deref for Lasers<COLOUR> {
+impl<const COLOUR: [f32; 3]> std::ops::Deref for Lasers<COLOUR> {
     type Target = Vec<Laser<COLOUR>>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
-impl<const COLOUR:[f32;3]> std::ops::DerefMut for Lasers<COLOUR> {
+impl<const COLOUR: [f32; 3]> std::ops::DerefMut for Lasers<COLOUR> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-
+/// The entities associated with cursor aiming a unit.
 #[derive(Default, Debug)]
 struct FiringLines(Vec<Entity>);
+/// The entities associated with displaying the tiles a projection crossed post a unit firing a weapon (for the moment this is only fof debug mode).
 #[derive(Default, Debug)]
 struct FiringPath(Vec<Entity>);
+/// The current user selected unit.
 #[derive(Default, Debug)]
 struct SelectedUnitOption(Option<[usize; 2]>);
+/// A player or AI controlled unit/soldier/pawn.
 #[derive(Component, Debug)]
 struct Unit {
     // Percentage of samples from `firing_distribution` that sit within the buckets of [-0.02..0.02,(-1..-0.02 & 0.02..1),(..-1 & 1..)]
     firing_buckets: [f32; 3],
     // Distribution from which we sample our firing inaccuracies.
     firing_distribution: rand_distr::Normal<f32>,
-    // Has this unit fired this turn?
-    fired: bool,
     // Distances to all reachable points from current position.
     distances: HashMap<[usize; 2], usize>,
     // Entities highlighting movement range.
     movement_range: Vec<Entity>,
-    // Remaining movement this unit has this turn.
-    movement: u8,
-    // Movement unit gets each turn.
-    maximum_movement: u8,
+    // Time unit takes to move 1 hex.
+    movement_time: f32,
+    // Time unit takes to fire once.
+    firing_time: f32,
+    // Remaining time this unit has this turn.
+    remaining_time: f32,
+    // Time unit has each turn.
+    time: f32,
 }
-impl Unit {
-    const SAMPLES: usize = 10000;
-    fn new(
-        maximum_movement: u8,
-        // map:&HexGrid<HexItem>
-    ) -> Self {
+/// Samples to take from firing distributions to approximate firing accuracies.
+const SAMPLES: usize = 10000;
+impl Default for Unit {
+    fn default() -> Self {
         let firing_distribution = rand_distr::Normal::new(0f32, 0.07f32).unwrap();
         Self {
-            firing_buckets: buckets(firing_distribution, Self::SAMPLES),
+            firing_buckets: buckets(firing_distribution, SAMPLES),
             firing_distribution,
-            fired: false,
             distances: HashMap::new(),
             movement_range: Vec::new(),
-            maximum_movement,
-            movement: maximum_movement,
+            movement_time: 10f32,
+            firing_time: 30f32,
+            remaining_time: 100f32,
+            time: 100f32,
         }
     }
 }
 
-fn hover_system<const HIGHLIGHT_COLOR: [u8; 4]>(
+/// Handles highlighting the tile the user's cursor is hovering over.
+fn hover_system(
     windows: Res<Windows>,
     mut commands: Commands,
-    mut cursor_evr: EventReader<CursorMoved>,
+    mut cursor_events: EventReader<CursorMoved>,
     hex_grid: ResMut<HexGrid<HexItem>>,
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>)>,
 ) {
     let hex_grid = hex_grid.into_inner();
-    for _ in cursor_evr.iter() {
+    for _ in cursor_events.iter() {
         let window = windows.get_primary().expect("no primary window");
         if let Some(cursor_position) = window.cursor_position() {
-            let cursor_position = cursor_position
-                - Vec2::new(window.width() / 2., window.height() / 2.);
+            let cursor_position =
+                cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
             // print!("{}",cursor_position);
 
             // TODO Here we skip our 1st camera (the ui camera) do this better
@@ -472,39 +566,43 @@ fn hover_system<const HIGHLIGHT_COLOR: [u8; 4]>(
             let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
             // println!("cursor_position: {:?}", cursor_position);
 
-            let indices = hex_grid.indices(cursor_position.to_array());
+            let indices = hex_grid.index(cursor_position.to_array());
             // println!("hover: {:?}",indices);
             match indices {
                 // If both logical pixel coordinates can be mapped to hexes within our hex grid
                 Some([x, y]) => {
-                    hex_grid.highlight_cell::<HIGHLIGHT_COLOR>(&mut commands, [x, y]);
+                    hex_grid
+                        .highlight_cell(&mut commands, [x, y], HOVER_COLOUR)
+                        .unwrap();
                 }
                 // If either logical pixel coordinates are outside our hex grid
                 _ => {
-                    hex_grid.remove_highlight::<HIGHLIGHT_COLOR>(&mut commands);
+                    hex_grid.remove_highlight(&mut commands, HOVER_COLOUR);
                 }
             }
         }
-        
     }
 }
 
-// Scales and translates cursor position relative to camera getting global cursor position.
+/// Scales and translates cursor position relative to camera to get a global cursor position.
 fn normalize_cursor_position(pos: Vec2, camera_transform: &Transform) -> Vec2 {
     (pos * camera_transform.scale.truncate()) + camera_transform.translation.truncate()
 }
+/// Handles game turn over e.g. clicking "next turn".
 fn turnover_system(
     keys: Res<Input<KeyCode>>,
-    mut query: Query<(&mut Unit)>,
+    mut query: Query<&mut Unit>,
     selected_entity: ResMut<SelectedUnitOption>,
     hex_grid: ResMut<HexGrid<HexItem>>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    camera_query: Query<(&Transform, With<bevy::prelude::Camera>)>,
 ) {
+    // TODO Here we effectively skip ui camera, do this better
+    let (camera_transform, _) = camera_query.iter().nth(1).unwrap();
     if keys.just_pressed(KeyCode::Space) {
         query.for_each_mut(|mut f| {
-            f.movement = f.maximum_movement;
-            f.fired = false;
+            f.remaining_time = f.time;
         });
         // Since we may be changing the movement of a selected unit we need to update the movement range of this unit
         if let Some(selected) = selected_entity.0 {
@@ -512,6 +610,7 @@ fn turnover_system(
                 .get_mut(hex_grid[selected].entity())
                 .unwrap()
                 .into_inner();
+
             // Update movement range
             clear_reachable(selected_unit, &mut commands);
             render_reachable(
@@ -520,13 +619,14 @@ fn turnover_system(
                 selected,
                 &hex_grid,
                 &asset_server,
+                *camera_transform,
             );
         }
     }
 }
 
 /// System handling unit movement
-fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
+fn unit_movement_system(
     selected_entity: ResMut<SelectedUnitOption>,
     mut commands: Commands,
     buttons: Res<Input<MouseButton>>,
@@ -536,7 +636,7 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>)>,
     asset_server: Res<AssetServer>,
     firing_line: ResMut<FiringLines>,
-    audio: Res<Audio>
+    audio: Res<Audio>,
 ) {
     let window = windows.get_primary().expect("no primary window");
     // Right click de-selects unit if a unit is selected
@@ -558,7 +658,7 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
         // Remove selected unit
         selected_entity.0 = None;
         // Remove unit position highlight
-        hex_grid.remove_highlight::<HIGHLIGHT_COLOR>(&mut commands);
+        hex_grid.remove_highlight(&mut commands, UNIT_SELECTION_COLOUR);
 
         // Removes old firing lines
         for line in firing_line.0.iter() {
@@ -577,7 +677,7 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
         let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
 
         // Get position on hex grid
-        let indices_opt = hex_grid.indices(cursor_position.to_array());
+        let indices_opt = hex_grid.index(cursor_position.to_array());
         if let Some(indices) = indices_opt {
             let hex_item = hex_grid.get_mut(indices);
 
@@ -605,11 +705,11 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
                     // println!("unit: {:?}",unit);
 
                     // Gets distance to this new position (it will be `None` if the position is not reachable)
-                    if let Some(distance) = unit.distances.get(&indices) {
+                    if let Some(&distance) = unit.distances.get(&indices) {
                         // println!("distance: {:?}->{:?}={}",selected,indices,distance);
 
                         // Gets logical pixel coordinates of new hex position
-                        let [new_x, new_y] = hex_grid.logical_pixel_coordinates(indices);
+                        let [new_x, new_y] = hex_grid.logical_pixels(indices).unwrap();
                         // Moves entity to new hex
                         transform.into_inner().translation = Vec3::from((new_x, new_y, 0f32));
                         // Sets new hex entity ref
@@ -619,17 +719,23 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
                         // Updates selected item
                         selected_entity.0 = Some(indices);
                         // Highlight new unit position
-                        hex_grid.highlight_cell::<HIGHLIGHT_COLOR>(&mut commands, indices);
+                        hex_grid
+                            .highlight_cell(&mut commands, indices, UNIT_SELECTION_COLOUR)
+                            .unwrap();
 
                         // Updates remaining movement
-                        unit.movement = unit
-                            .movement
-                            .checked_sub(u8::try_from(*distance).unwrap())
-                            .unwrap();
+                        unit.remaining_time -= unit.movement_time * distance as f32;
 
                         // Movement range
                         clear_reachable(unit, &mut commands);
-                        render_reachable(unit, &mut commands, indices, hex_grid, &asset_server);
+                        render_reachable(
+                            unit,
+                            &mut commands,
+                            indices,
+                            hex_grid,
+                            &asset_server,
+                            *camera_transform,
+                        );
                         // Removes old firing lines
 
                         for line in firing_line.0.iter() {
@@ -651,7 +757,9 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
                 // If we clicked an entity.
                 (_, Some(HexItem::Entity(_))) => {
                     // Highlight new unit position
-                    hex_grid.highlight_cell::<HIGHLIGHT_COLOR>(&mut commands, indices);
+                    hex_grid
+                        .highlight_cell(&mut commands, indices, UNIT_SELECTION_COLOUR)
+                        .unwrap();
                     // If we had previous unit selected clear the reachable areas on this unit
                     if let Some(old_index) = selected_entity.0 {
                         let (_, old_unit, _) = query.get_mut(hex_grid[old_index].entity()).unwrap();
@@ -667,6 +775,7 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
                         indices,
                         hex_grid,
                         &asset_server,
+                        *camera_transform,
                     );
                     // Set new selected entity.
                     selected_entity.0 = Some(indices);
@@ -682,21 +791,34 @@ fn unit_movement_system<const HIGHLIGHT_COLOR: [u8; 4]>(
         }
     }
 }
+/// Clears all reachable tiles for a given [`Unit`].
 fn clear_reachable(unit: &mut Unit, commands: &mut Commands) {
     for entity in unit.movement_range.iter() {
         commands.entity(*entity).despawn();
     }
     unit.movement_range = Vec::new();
 }
+/// The colour used to highlight reachable tiles.
+const REACHABLE_COLOR: Color = Color::rgba(0., 1., 0., 0.1);
+/// The font size of unit remaining time displayed on reachable tiles.
+const MOVEMENT_TIME_REMAINING_FONT_SIZE: f32 = 20f32;
+/// The font size of possible remaining shots displayed on reachable tiles.
+const MOVEMENT_SHOTS_REMAINING_FONT_SIZE: f32 = 40f32;
+/// Spacing between possible shots and remaining unit time displayed on reachable tiles.
+const REACHABLE_TEXT_SPACING: f32 = 5f32;
+/// The zoom range within which to display remaining time units on a units reachable tiles.
+const ZOOM_DISPLAY_TIME_RANGE: std::ops::RangeTo<f32> = ..1.5f32;
 fn render_reachable(
-    new_unit: &mut Unit,
+    unit: &mut Unit,
     commands: &mut Commands,
     hex: [usize; 2],
     hex_grid: &HexGrid<HexItem>,
     asset_server: &AssetServer,
+    camera_transform: Transform,
 ) {
+    let max_movement = (unit.remaining_time / unit.movement_time) as usize;
     // Gets reachable positions
-    let fringes = hex_grid.reachable(hex, new_unit.movement as usize);
+    let fringes = hex_grid.reachable(hex, max_movement);
     // Updates distances to all reachable positions
     let distances = fringes
         .iter()
@@ -708,44 +830,42 @@ fn render_reachable(
                 .collect::<Vec<_>>()
         })
         .collect::<HashMap<_, _>>();
-    new_unit.distances = distances;
+    unit.distances = distances;
     // Sets new movement range components
     let highlight_entities = fringes
         .into_iter()
         .enumerate()
         .skip(1)
         .flat_map(|(distance, hexes)| {
+            let time_remaining_after_move =
+                unit.remaining_time - unit.movement_time * distance as f32;
+            let shots_remaining = (time_remaining_after_move / unit.firing_time) as usize;
             hexes
                 .into_iter()
                 .flat_map(|reachable_hex| {
-                    let [x, y] = hex_grid.logical_pixel_coordinates(reachable_hex);
+                    let [x, y] = hex_grid.logical_pixels(reachable_hex).unwrap();
                     // println!("pos: {:?}", [x, y]);
                     let highlight = commands
                         .spawn_bundle(GeometryBuilder::build_as(
                             &bevy_prototype_lyon::shapes::RegularPolygon {
                                 sides: 6,
                                 center: Vec2::new(x, y),
-                                feature: RegularPolygonFeature::SideLength(
-                                    HexGrid::<HexItem>::SIDE_LENGTH,
-                                ),
+                                feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
                             },
                             DrawMode::Outlined {
-                                fill_mode: FillMode::color(Color::rgba(0., 1., 0., 0.3)),
-                                outline_mode: StrokeMode::new(
-                                    Color::rgba(0., 1., 0., 0.3),
-                                    HexGrid::<HexItem>::LINE_WIDTH,
-                                ),
+                                fill_mode: FillMode::color(REACHABLE_COLOR),
+                                outline_mode: StrokeMode::new(REACHABLE_COLOR, HEX_OUTLINE_WIDTH),
                             },
                             Transform::default(),
                         ))
                         .id();
-                    let distance_text = commands
+                    let shots_text = commands
                         .spawn_bundle(Text2dBundle {
                             text: Text::with_section(
-                                distance.to_string(),
+                                shots_remaining.to_string(),
                                 TextStyle {
                                     font: asset_server.load("SmoochSans-Light.ttf"),
-                                    font_size: 60.0,
+                                    font_size: MOVEMENT_SHOTS_REMAINING_FONT_SIZE,
                                     color: Color::WHITE,
                                 },
                                 TextAlignment {
@@ -754,144 +874,176 @@ fn render_reachable(
                                 },
                             ),
                             transform: Transform {
-                                translation: Vec3::new(x, y, 0f32),
+                                translation: Vec3::new(
+                                    x,
+                                    y + MOVEMENT_TIME_REMAINING_FONT_SIZE / 2f32,
+                                    0f32,
+                                ),
                                 ..Default::default()
                             },
                             ..Default::default()
                         })
                         .id();
-                    [highlight, distance_text]
+                    // If within zoom display range, display remaining unit time.
+                    if ZOOM_DISPLAY_TIME_RANGE.contains(&camera_transform.scale.to_array()[0]) {
+                        let distance_text = commands
+                            .spawn_bundle(Text2dBundle {
+                                text: Text::with_section(
+                                    format!("{:.0}", time_remaining_after_move),
+                                    TextStyle {
+                                        font: asset_server.load("SmoochSans-Light.ttf"),
+                                        font_size: MOVEMENT_TIME_REMAINING_FONT_SIZE,
+                                        color: Color::WHITE,
+                                    },
+                                    TextAlignment {
+                                        vertical: VerticalAlign::Center,
+                                        horizontal: HorizontalAlign::Center,
+                                    },
+                                ),
+                                transform: Transform {
+                                    translation: Vec3::new(
+                                        x,
+                                        y - MOVEMENT_TIME_REMAINING_FONT_SIZE / 2f32
+                                            - REACHABLE_TEXT_SPACING,
+                                        0f32,
+                                    ),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            })
+                            .id();
+                        vec![highlight, distance_text, shots_text]
+                    } else {
+                        vec![highlight, shots_text]
+                    }
                 })
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    new_unit.movement_range = highlight_entities;
+    unit.movement_range = highlight_entities;
 }
 
 use bevy::input::mouse::MouseWheel;
 /// System handling camera movement
-fn camera_movement_system<const MIN_ZOOM: f32, const MAX_ZOOM: f32>(
+fn camera_movement_system(
     keys: Res<Input<KeyCode>>,
-    mut scroll_evr: EventReader<MouseWheel>,
-    mut query: Query<(&mut Transform, With<bevy::prelude::Camera>)>,
+    mut scroll_events: EventReader<MouseWheel>,
+    mut camera_query: Query<(&mut Transform, With<bevy::prelude::Camera>)>,
     hex_grid: Res<HexGrid<HexItem>>,
 ) {
     // println!("\n");
     // TODO: We currently use `skip(1)` to skip the ui camera, is there not a better way to do this?
-    for (transform, _) in query.iter_mut().skip(1) {
-        let transform = transform.into_inner();
-        if keys.pressed(KeyCode::W) || keys.pressed(KeyCode::Up) {
-            // println!("up");
-            // You cannot move the camera such that the center is off the hex grid.
-            let temp = transform.translation[1] + 10f32;
-            if temp < hex_grid.logical_pixel_bounds()[1].end {
-                transform.translation[1] = temp;
-            }
+    let (camera_transform, _) = camera_query.iter_mut().nth(1).unwrap();
+    let camera_transform = camera_transform.into_inner();
+    if keys.pressed(KeyCode::W) || keys.pressed(KeyCode::Up) {
+        // println!("up");
+        // You cannot move the camera such that the center is off the hex grid.
+        let temp = camera_transform.translation[1] + 10f32;
+        if temp < hex_grid.logical_pixel_bounds[1].end {
+            camera_transform.translation[1] = temp;
         }
-        if keys.pressed(KeyCode::S) || keys.pressed(KeyCode::Down) {
-            // println!("down");
-            // You cannot move the camera such that the center is off the hex grid.
-            let temp = transform.translation[1] - 10f32;
-            if temp > hex_grid.logical_pixel_bounds()[1].start {
-                transform.translation[1] = temp;
-            }
+    }
+    if keys.pressed(KeyCode::S) || keys.pressed(KeyCode::Down) {
+        // println!("down");
+        // You cannot move the camera such that the center is off the hex grid.
+        let temp = camera_transform.translation[1] - 10f32;
+        if temp > hex_grid.logical_pixel_bounds[1].start {
+            camera_transform.translation[1] = temp;
         }
-        if keys.pressed(KeyCode::A) || keys.pressed(KeyCode::Left) {
-            // println!("left");
-            // You cannot move the camera such that the center is off the hex grid.
-            let temp = transform.translation[0] - 10f32;
-            if temp > hex_grid.logical_pixel_bounds()[0].start {
-                transform.translation[0] = temp;
-            }
+    }
+    if keys.pressed(KeyCode::A) || keys.pressed(KeyCode::Left) {
+        // println!("left");
+        // You cannot move the camera such that the center is off the hex grid.
+        let temp = camera_transform.translation[0] - 10f32;
+        if temp > hex_grid.logical_pixel_bounds[0].start {
+            camera_transform.translation[0] = temp;
         }
-        if keys.pressed(KeyCode::D) || keys.pressed(KeyCode::Right) {
-            // println!("right");
-            // You cannot move the camera such that the center is off the hex grid.
-            let temp = transform.translation[0] + 10f32;
-            if temp < hex_grid.logical_pixel_bounds()[0].end {
-                transform.translation[0] = temp;
-            }
+    }
+    if keys.pressed(KeyCode::D) || keys.pressed(KeyCode::Right) {
+        // println!("right");
+        // You cannot move the camera such that the center is off the hex grid.
+        let temp = camera_transform.translation[0] + 10f32;
+        if temp < hex_grid.logical_pixel_bounds[0].end {
+            camera_transform.translation[0] = temp;
         }
-        for ev in scroll_evr.iter() {
-            match ev.unit {
-                MouseScrollUnit::Line => {
-                    // println!("camera: {:?}",camera);
-                    // println!("Scroll (line units): vertical: {}, horizontal: {}", ev.y, ev.x);
-                    let temp = transform.scale - (ev.y / 10f32);
-                    if temp[0] >= MIN_ZOOM && temp[0] <= MAX_ZOOM {
-                        transform.scale = temp;
-                    }
-                }
-                MouseScrollUnit::Pixel => {
-                    // println!("Scroll (pixel units): vertical: {}, horizontal: {}", ev.y, ev.x);
-                    let temp = transform.scale - (ev.y / 10f32);
-                    if temp[0] >= MIN_ZOOM && temp[0] <= MAX_ZOOM {
-                        transform.scale = temp;
-                    }
-                }
-            }
+    }
+    for scroll_event in scroll_events.iter() {
+        let temp = camera_transform.scale - (scroll_event.y / 10f32);
+        if (MIN_ZOOM..MAX_ZOOM).contains(&temp[0]) {
+            camera_transform.scale = temp;
         }
     }
 }
-use rand_distr::Distribution;
-fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECONDS:f32,const SHOT_OPACITY: f32, const SHOT_DECAY:f32>(
+
+/// Handles units firing weapons.
+fn firing_system<
+    const SHOT_COLOUR: [f32; 3],
+    const SHOT_WIDTH: f32,
+    const SHOT_SECONDS: f32,
+    const SHOT_OPACITY: f32,
+    const SHOT_DECAY: f32,
+>(
     time: Res<Time>,
     selected_entity: ResMut<SelectedUnitOption>,
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>)>,
-    mut unit_query: Query<(&mut Unit)>,
+    mut unit_query: Query<&mut Unit>,
     windows: Res<Windows>,
     hex_grid: ResMut<HexGrid<HexItem>>,
     mut commands: Commands,
     firing_line: ResMut<FiringLines>,
-    firing_path: ResMut<FiringPath>,
-    mut cursor_evr: EventReader<CursorMoved>,
+    #[cfg(debug_assertions)] firing_path: ResMut<FiringPath>,
+    mut cursor_events: EventReader<CursorMoved>,
     asset_server: Res<AssetServer>,
     keys: Res<Input<KeyCode>>,
     lasers: ResMut<Lasers<SHOT_COLOUR>>,
-    audio: Res<Audio>
+    audio: Res<Audio>,
 ) {
     let firing_line = firing_line.into_inner();
     let hex_grid = hex_grid.into_inner();
     // Checks timer on all rendered lasers on whether to remove them
     let lasers = lasers.into_inner();
-    lasers.0 = lasers.iter().cloned().filter_map(|mut laser|{
-        // Ticks timer and checks if finished
-        // println!("laser.timer.elapsed(): {:?}, {}",laser.timer.elapsed(),laser.timer.finished());
-        if laser.timer.tick(time.delta()).just_finished() {
-            // Removes old entity
-            commands.entity(laser.entity).despawn();
-            // println!("{} > {}",laser.decay,laser.opacity);
-            if laser.decay > laser.opacity {
-                None
-            }
-            else {
-                laser.opacity -= laser.decay;
-                // Renders new entity
-                let shot_colour = Color::rgba(SHOT_COLOUR[0],SHOT_COLOUR[1],SHOT_COLOUR[2],laser.opacity);
-                laser.entity = commands
-                    .spawn_bundle(GeometryBuilder::build_as(
-                        &bevy_prototype_lyon::shapes::Line(laser.from, laser.to),
-                        DrawMode::Outlined {
-                            fill_mode: FillMode::color(shot_colour),
-                            outline_mode: StrokeMode::new(
-                                shot_colour,
-                                SHOT_WIDTH,
-                            ),
-                        },
-                        Transform {
-                            translation: Vec3::new(0f32, 0f32, 3f32),
-                            ..Default::default()
-                        },
-                    ))
-                    .id();
+    lasers.0 = lasers
+        .iter()
+        .cloned()
+        .filter_map(|mut laser| {
+            // Ticks timer and checks if finished
+            // println!("laser.timer.elapsed(): {:?}, {}",laser.timer.elapsed(),laser.timer.finished());
+            if laser.timer.tick(time.delta()).just_finished() {
+                // Removes old entity
+                commands.entity(laser.entity).despawn();
+                // println!("{} > {}",laser.decay,laser.opacity);
+                if laser.decay > laser.opacity {
+                    None
+                } else {
+                    laser.opacity -= laser.decay;
+                    // Renders new entity
+                    let shot_colour = Color::rgba(
+                        SHOT_COLOUR[0],
+                        SHOT_COLOUR[1],
+                        SHOT_COLOUR[2],
+                        laser.opacity,
+                    );
+                    laser.entity = commands
+                        .spawn_bundle(GeometryBuilder::build_as(
+                            &bevy_prototype_lyon::shapes::Line(laser.from, laser.to),
+                            DrawMode::Outlined {
+                                fill_mode: FillMode::color(shot_colour),
+                                outline_mode: StrokeMode::new(shot_colour, SHOT_WIDTH),
+                            },
+                            Transform {
+                                translation: Vec3::new(0f32, 0f32, 3f32),
+                                ..Default::default()
+                            },
+                        ))
+                        .id();
+                    Some(laser)
+                }
+            } else {
                 Some(laser)
             }
-        }
-        else {
-            Some(laser)
-        }
-    }).collect::<Vec<_>>();
-    
+        })
+        .collect::<Vec<_>>();
+
     // TODO This hit detection super janky, make it better.
     // If user pressed f key
     if keys.just_pressed(KeyCode::F) {
@@ -903,26 +1055,30 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
             let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
 
             if let Some(selected) = selected_entity.0 {
-                let unit = unit_query.get_mut(hex_grid[selected].entity()).unwrap().into_inner();
+                let unit = unit_query
+                    .get_mut(hex_grid[selected].entity())
+                    .unwrap()
+                    .into_inner();
                 // If unit hasn't already fired this turn
-                if !unit.fired {
+                if unit.remaining_time > unit.firing_time {
                     let theta = unit.firing_distribution.sample(&mut rand::thread_rng());
 
-                    let [ax, ay] = hex_grid.logical_pixel_coordinates(selected);
+                    let [ax, ay] = hex_grid.logical_pixels(selected).unwrap();
                     let [bx, by] = cursor_position.to_array();
                     let [cx, cy] = rotate_point_around_point([ax, ay], [bx, by], theta);
                     let steps = 100;
                     let vector = Vec2::from([cx - ax, cy - ay]) / steps as f32;
 
-                    
                     // Calculates new firing path
                     let mut current = Vec2::from([ax, ay]);
                     // TODO We really only need to calculate distance(a,c) points. Do this instead (like https://www.redblobgames.com/grids/hexagons/#line-drawing).
-                    let mut hex_path = BTreeSet::new();
+                    let mut hex_path = HashSet::new();
                     loop {
                         current += vector;
                         // If indexes within grid can be given
-                        if let Some(hex) = hex_grid.indices(current.to_array()) {
+                        if let Some(hex) = hex_grid.index(current.to_array()) {
+                            // TODO Do this skip better.
+                            // Skip hex if its the origin.
                             if hex == selected {
                                 continue;
                             }
@@ -931,9 +1087,11 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
                                 break;
                             }
                             hex_path.insert(hex);
-                            
+
                             match hex_grid[hex] {
-                                HexItem::Empty => { continue; },
+                                HexItem::Empty => {
+                                    continue;
+                                }
                                 HexItem::Entity(entity) => {
                                     audio.set_volume(0.2);
                                     audio.play(asset_server.load("zapsplat_multimedia_game_sound_monster_hit_impact_kill_warp_weird_78163.mp3"));
@@ -943,7 +1101,7 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
                                     commands.entity(entity).despawn();
 
                                     break;
-                                },
+                                }
                                 HexItem::Obstruction => {
                                     break;
                                 }
@@ -967,21 +1125,23 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
                         firing_path.0 = hex_path
                             .into_iter()
                             .map(|hex| {
-                                let hex_coords = hex_grid.logical_pixel_coordinates(hex);
+                                let hex_coords = hex_grid.logical_pixels(hex).unwrap();
                                 commands
                                     .spawn_bundle(GeometryBuilder::build_as(
                                         &bevy_prototype_lyon::shapes::RegularPolygon {
                                             sides: 6,
                                             center: Vec2::from(hex_coords),
                                             feature: RegularPolygonFeature::SideLength(
-                                                HexGrid::<HexItem>::SIDE_LENGTH,
+                                                HEX_SIDE_LENGTH,
                                             ),
                                         },
                                         DrawMode::Outlined {
-                                            fill_mode: FillMode::color(Color::rgba(1., 1., 1., 0.2)),
+                                            fill_mode: FillMode::color(Color::rgba(
+                                                1., 1., 1., 0.2,
+                                            )),
                                             outline_mode: StrokeMode::new(
                                                 Color::rgba(1., 1., 1., 0.2),
-                                                HexGrid::<HexItem>::LINE_WIDTH,
+                                                HEX_OUTLINE_WIDTH,
                                             ),
                                         },
                                         Transform::default(),
@@ -990,46 +1150,55 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
                             })
                             .collect::<Vec<_>>();
                     }
-                    
-
 
                     // Draws shot (since I don't want to handle animation a bullet, its a laser which appears for a couple frames)
-                    let shot_colour = Color::rgba(SHOT_COLOUR[0],SHOT_COLOUR[1],SHOT_COLOUR[2],SHOT_OPACITY);
+                    let shot_colour =
+                        Color::rgba(SHOT_COLOUR[0], SHOT_COLOUR[1], SHOT_COLOUR[2], SHOT_OPACITY);
                     let from = Vec2::from([ax, ay]);
                     let to = current;
                     lasers.push(Laser {
-                        entity:commands
-                        .spawn_bundle(GeometryBuilder::build_as(
-                            &bevy_prototype_lyon::shapes::Line(from,to),
-                            DrawMode::Outlined {
-                                fill_mode: FillMode::color(shot_colour),
-                                outline_mode: StrokeMode::new(
-                                    shot_colour,
-                                    SHOT_WIDTH,
-                                ),
-                            },
-                            Transform {
-                                translation: Vec3::new(0f32, 0f32, 3f32),
-                                ..Default::default()
-                            },
-                        ))
-                        .id(),
+                        entity: commands
+                            .spawn_bundle(GeometryBuilder::build_as(
+                                &bevy_prototype_lyon::shapes::Line(from, to),
+                                DrawMode::Outlined {
+                                    fill_mode: FillMode::color(shot_colour),
+                                    outline_mode: StrokeMode::new(shot_colour, SHOT_WIDTH),
+                                },
+                                Transform {
+                                    translation: Vec3::new(0f32, 0f32, 3f32),
+                                    ..Default::default()
+                                },
+                            ))
+                            .id(),
                         decay: SHOT_DECAY,
                         opacity: SHOT_OPACITY,
-                        timer: Timer::from_seconds(SHOT_SECONDS,true),
-                        from, 
-                        to
+                        timer: Timer::from_seconds(SHOT_SECONDS, true),
+                        from,
+                        to,
                     });
                     audio.set_volume(0.2);
-                    audio.play(asset_server.load("cartoon_anime_burst_laser_beam_energy_fast_hard_71598.mp3"));
-                    unit.fired = true;
+                    audio.play(
+                        asset_server
+                            .load("cartoon_anime_burst_laser_beam_energy_fast_hard_71598.mp3"),
+                    );
+                    unit.remaining_time -= unit.firing_time;
+
+                    // Movement range
+                    clear_reachable(unit, &mut commands);
+                    render_reachable(
+                        unit,
+                        &mut commands,
+                        selected,
+                        hex_grid,
+                        &asset_server,
+                        *camera_transform,
+                    );
                 }
-                
             }
         }
     }
     // TODO Use cursor position from `_ev` instead of `window`.
-    for _ev in cursor_evr.iter() {
+    for _ev in cursor_events.iter() {
         // println!(
         //     "New cursor position: X: {}, Y: {}, in Window ID: {:?}",
         //     ev.position.x, ev.position.y, ev.id
@@ -1051,12 +1220,11 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
             let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
             if let Some(selected) = selected_entity.0 {
                 // Get the pixels corresponding to the center of the hex `selected` on the grid.
-                let hex = hex_grid.logical_pixel_coordinates(selected);
-                let bounds = hex_grid.logical_pixel_bounds();
+                let hex = hex_grid.logical_pixels(selected).unwrap();
                 let extended_bounds = {
-                    let [x, y] = bounds;
+                    let [x, y] = hex_grid.logical_pixel_bounds.clone();
                     // We expand bounds so line is drawn to edge and doesn't end at edge hex
-                    let [w, h] = [HexGrid::<HexItem>::WIDTH, HexGrid::<HexItem>::HEIGHT];
+                    let [w, h] = [HEX_WIDTH, HEX_HEIGHT];
                     [x.start - w..x.end + w, y.start - h..y.end + h]
                 };
                 // Calculate end point
@@ -1096,10 +1264,7 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
 
                 let draw = DrawMode::Outlined {
                     fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.3)),
-                    outline_mode: StrokeMode::new(
-                        Color::rgba(0., 0., 0., 0.3),
-                        HexGrid::<HexItem>::LINE_WIDTH,
-                    ),
+                    outline_mode: StrokeMode::new(Color::rgba(0., 0., 0., 0.3), HEX_OUTLINE_WIDTH),
                 };
                 let transform = Transform {
                     translation: Vec3::new(0f32, 0f32, 2f32),
@@ -1125,7 +1290,7 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
                                 fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.1)),
                                 outline_mode: StrokeMode::new(
                                     Color::rgba(0., 0., 0., 0.1),
-                                    HexGrid::<HexItem>::LINE_WIDTH,
+                                    HEX_OUTLINE_WIDTH,
                                 ),
                             },
                             transform.clone(),
@@ -1165,18 +1330,19 @@ fn firing_system<const SHOT_COLOUR:[f32;3],const SHOT_WIDTH:f32,const SHOT_SECON
         }
     }
 }
-fn angle_between_two_points([ax, ay]: [f32; 2], [bx, by]: [f32; 2]) -> f32 {
-    let delta_x = ax - bx;
-    let delta_y = ay - by;
-    let radians = delta_y.atan2(delta_x);
-    radians
-}
-fn cartesian_distance([ax, ay]: [f32; 2], [bx, by]: [f32; 2]) -> f32 {
-    ((ax as f32 - bx as f32).powi(2) + (ay as f32 - by as f32).powi(2)).sqrt()
-}
+// fn angle_between_two_points([ax, ay]: [f32; 2], [bx, by]: [f32; 2]) -> f32 {
+//     let delta_x = ax - bx;
+//     let delta_y = ay - by;
+//     let radians = delta_y.atan2(delta_x);
+//     radians
+// }
+// fn cartesian_distance([ax, ay]: [f32; 2], [bx, by]: [f32; 2]) -> f32 {
+//     ((ax as f32 - bx as f32).powi(2) + (ay as f32 - by as f32).powi(2)).sqrt()
+// }
+
 /// Returns a point on line from `a` through `c` (where `c` is `b` rotated about `a` by `theta` radians) that lies on the `bounds`.
 ///
-/// https://www.desmos.com/calculator/zdzfdwsjxa
+/// <https://www.desmos.com/calculator/zdzfdwsjxa>
 fn end_point(
     [ax, ay]: [f32; 2],
     [bx, by]: [f32; 2],
@@ -1212,7 +1378,7 @@ fn rotate_point_around_point([ax, ay]: [f32; 2], [bx, by]: [f32; 2], theta: f32)
         dx * theta.sin() + dy * theta.cos() + ay,
     ]
 }
-// std::cmp::max supporting f32
+/// [`std::cmp::max`] supporting f32
 fn max(a: f32, b: f32) -> f32 {
     if a > b {
         a
@@ -1220,7 +1386,7 @@ fn max(a: f32, b: f32) -> f32 {
         b
     }
 }
-// std::cmp::min supporting f32
+/// [`std::cmp::min`] supporting f32
 fn min(a: f32, b: f32) -> f32 {
     if a < b {
         a
@@ -1228,11 +1394,12 @@ fn min(a: f32, b: f32) -> f32 {
         b
     }
 }
-// Returns the probability of sampling ranges of values from a distribution
-// The buckets being:
-// - -0.02..0.02
-// - -0.1..-0.02 & 0.02..0.1
-// - ..-0.1 & 0.1..
+/// Returns the probability of sampling specific ranges of values from a given distribution.
+///
+/// The buckets being:
+/// - `-0.02..0.02`
+/// - `-0.1..-0.02` & `0.02..0.1`
+/// - `..-0.1` & `0.1..`
 fn buckets<D: rand_distr::Distribution<f32>>(dist: D, samples: usize) -> [f32; 3] {
     let mut buckets = [0; 3];
     for sample in dist.sample_iter(rand::thread_rng()).take(samples) {
