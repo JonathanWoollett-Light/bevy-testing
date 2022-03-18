@@ -194,15 +194,18 @@ impl<T: std::fmt::Debug> HexGrid<T> {
         x < self.width && y < self.height
     }
     /// Render background hexagons on grid.
-    fn render(&self, commands: &mut Commands) {
+    fn spawn_background(&self, commands: &mut Commands) {
+        #[cfg(debug_assertions)]
+        println!("spawn_background() started");
+
         for y in 0..self.height {
             for x in 0..self.width {
-                let [center_x, center_y] = self.logical_pixels([x, y]).unwrap();
-                // println!("[{},{}] -> [{:.1},{:.1}]",x,y,center_x,center_y);
+                let [cx, cy] = self.logical_pixels([x, y]).unwrap();
+
                 commands.spawn_bundle(GeometryBuilder::build_as(
                     &bevy_prototype_lyon::shapes::RegularPolygon {
                         sides: 6,
-                        center: Vec2::new(center_x, center_y),
+                        center: Vec2::new(cx, cy),
                         feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
                     },
                     DrawMode::Outlined {
@@ -213,6 +216,9 @@ impl<T: std::fmt::Debug> HexGrid<T> {
                 ));
             }
         }
+
+        #[cfg(debug_assertions)]
+        println!("spawn_background() finished");
     }
     /// Removes highlight for hex highlighted by `COLOUR` returning whether the highlight was present.
     fn remove_highlight(&mut self, commands: &mut Commands, colour: Colour) -> bool {
@@ -241,20 +247,9 @@ impl<T: std::fmt::Debug> HexGrid<T> {
             // Removes highlight if it exists.
             let removed = self.remove_highlight(commands, colour);
 
-            let [x, y] = self.logical_pixels(index).unwrap();
-            let highlight = commands.spawn_bundle(GeometryBuilder::build_as(
-                &bevy_prototype_lyon::shapes::RegularPolygon {
-                    sides: 6,
-                    center: Vec2::new(x, y),
-                    feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
-                },
-                DrawMode::Outlined {
-                    fill_mode: FillMode::color(*colour),
-                    outline_mode: StrokeMode::new(*colour, HEX_OUTLINE_WIDTH),
-                },
-                Transform::default(),
-            ));
-            self.highlights.insert(colour, highlight.id());
+            let hex = self.logical_pixels(index).unwrap();
+            let highlight = spawn_hex(hex, *colour, commands);
+            self.highlights.insert(colour, highlight);
             Ok(removed)
         } else {
             Err("Hex coordinates given where outside grid thus hex could not be highlighted.")
@@ -340,8 +335,12 @@ impl<T: std::fmt::Debug> HexGrid<T> {
     }
 }
 
+const OBSTRUCTION_HEX_COLOUR: Color = Color::rgba(1., 1., 1., 1.);
+
 impl HexGrid<HexItem> {
     fn add_unit(&mut self, commands: &mut Commands, component: Unit, index: [usize; 2]) {
+        #[cfg(debug_assertions)]
+        println!("add_unit() started");
         let [x, y] = self.logical_pixels(index).unwrap();
         let new_entity = commands
             .spawn_bundle(SpriteBundle {
@@ -359,21 +358,13 @@ impl HexGrid<HexItem> {
             .insert(component)
             .id();
         self[index] = HexItem::Entity(new_entity);
+
+        #[cfg(debug_assertions)]
+        println!("add_unit() finished");
     }
     fn add_obstruction(&mut self, commands: &mut Commands, index: [usize; 2]) {
-        let [x, y] = self.logical_pixels(index).unwrap();
-        commands.spawn_bundle(GeometryBuilder::build_as(
-            &bevy_prototype_lyon::shapes::RegularPolygon {
-                sides: 6,
-                center: Vec2::new(x, y),
-                feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
-            },
-            DrawMode::Outlined {
-                fill_mode: FillMode::color(Color::rgba(1., 1., 1., 1.)),
-                outline_mode: StrokeMode::new(Color::rgba(1., 1., 1., 1.), HEX_OUTLINE_WIDTH),
-            },
-            Transform::default(),
-        ));
+        let hex = self.logical_pixels(index).unwrap();
+        spawn_hex(hex, OBSTRUCTION_HEX_COLOUR, commands);
         self[index] = HexItem::Obstruction;
     }
     /// Returns a 2d vec of reachable indices from the given index (where `vec[x][2]` denotes the an index reachable in `x` steps).
@@ -434,6 +425,8 @@ impl Default for HexItem {
 }
 /// Sets up initial system state.
 fn setup(mut commands: Commands) {
+    #[cfg(debug_assertions)]
+    println!("setup() started");
     // cameras
     commands.spawn_bundle(OrthographicCameraBundle::new_2d());
     commands.spawn_bundle(UiCameraBundle::default());
@@ -445,33 +438,52 @@ fn setup(mut commands: Commands) {
     let grid_width = 39;
 
     let mut hex_grid = HexGrid::new(grid_width, grid_height);
+    hex_grid.spawn_background(&mut commands);
+
     // Adds some obstructions
     let map: MapDescriptor =
         serde_json::from_str(&std::fs::read_to_string("map.json").unwrap()).unwrap();
+
     for hex in map.obstacles.into_iter() {
         hex_grid.add_obstruction(&mut commands, hex);
     }
+    #[cfg(debug_assertions)]
+    println!("spawned obstructions");
 
-    hex_grid.render(&mut commands);
+    let mut units = Vec::new();
+    for hex in map.player_spawns {
+        println!("hex: {:?}", hex);
+        units.push((Unit::default(), hex));
+    }
+    // let units = map
+    //     .player_spawns
+    //     .into_iter()
+    //     .map(|hex| (Unit::default(), hex))
+    //     .collect::<Vec<_>>();
 
-    let units = map
-        .player_spawns
-        .into_iter()
-        .map(|hex| (Unit::default(), hex))
-        .collect::<Vec<_>>();
+    #[cfg(debug_assertions)]
+    println!("units: {:?}", units);
 
+    // Add units
+    // ----------------------------------------------------
+
+    #[cfg(debug_assertions)]
+    println!("started spawning units");
+
+    for (unit, index) in units.into_iter() {
+        hex_grid.add_unit(&mut commands, unit, index);
+    }
+    #[cfg(debug_assertions)]
+    println!("spawned units");
+
+    commands.insert_resource(hex_grid);
     commands.insert_resource(SelectedUnitOption::default());
     commands.insert_resource(FiringLines::default());
     #[cfg(debug_assertions)]
     commands.insert_resource(FiringPath::default());
 
-    // Add units
-    // ----------------------------------------------------
-
-    for (unit, index) in units.into_iter() {
-        hex_grid.add_unit(&mut commands, unit, index);
-    }
-    commands.insert_resource(hex_grid);
+    #[cfg(debug_assertions)]
+    println!("setup() finished");
 }
 /// The list of all [`Laser`]s present on screen.
 #[derive(Debug, Default)]
@@ -514,10 +526,6 @@ struct Unit {
     firing_buckets: [f32; 3],
     // Distribution from which we sample our firing inaccuracies.
     firing_distribution: rand_distr::Normal<f32>,
-    // Distances to all reachable points from current position.
-    distances: HashMap<[usize; 2], usize>,
-    // Entities highlighting movement range.
-    movement_range: Vec<Entity>,
     // Time unit takes to move 1 hex.
     movement_time: f32,
     // Time unit takes to fire once.
@@ -526,6 +534,65 @@ struct Unit {
     remaining_time: f32,
     // Time unit has each turn.
     time: f32,
+    // Data associated with unit movement
+    movement_data: MovementData,
+}
+impl Unit {
+    fn show_time(
+        &mut self,
+        hex_grid: &HexGrid<HexItem>,
+        commands: &mut Commands,
+        asset_server: &AssetServer,
+    ) {
+        if self.movement_data.remaining_time.is_empty() {
+            for (index, distance) in self.movement_data.reachable_tiles.iter() {
+                let [x, y] = hex_grid.logical_pixels(*index).unwrap();
+                let time_remaining_after_move =
+                    self.remaining_time - *distance as f32 * self.movement_time;
+                self.movement_data.remaining_time.push(spawn_text(
+                    (time_remaining_after_move as u32).to_string(),
+                    [
+                        x,
+                        y - MOVEMENT_TIME_REMAINING_FONT_SIZE / 2f32 - REACHABLE_TEXT_SPACING,
+                    ],
+                    MOVEMENT_TIME_REMAINING_FONT_SIZE,
+                    commands,
+                    asset_server,
+                ));
+            }
+        }
+    }
+}
+#[derive(Debug, Default)]
+struct MovementData {
+    // Distances to all reachable points from current position.
+    reachable_tiles: HashMap<[usize; 2], usize>,
+    // Entities highlighting reachable tiles.
+    tile_highlights: Vec<Entity>,
+    // Entities of text denoting remaining time on reachable tiles after moving to them.
+    remaining_time: Vec<Entity>,
+    // Entities of text denoting possible shots from reachable tiles after moving to them.
+    possible_shots: Vec<Entity>,
+}
+impl MovementData {
+    fn clear(&mut self, commands: &mut Commands) {
+        for tile_highlight in self.tile_highlights.iter() {
+            commands.entity(*tile_highlight).despawn();
+        }
+        for remaining_time in self.remaining_time.iter() {
+            commands.entity(*remaining_time).despawn();
+        }
+        for possible_shot in self.possible_shots.iter() {
+            commands.entity(*possible_shot).despawn();
+        }
+        *self = Default::default();
+    }
+    fn clear_time(&mut self, commands: &mut Commands) {
+        for remaining_time in self.remaining_time.iter() {
+            commands.entity(*remaining_time).despawn();
+        }
+        self.remaining_time = Vec::new();
+    }
 }
 /// Samples to take from firing distributions to approximate firing accuracies.
 const SAMPLES: usize = 10000;
@@ -535,12 +602,11 @@ impl Default for Unit {
         Self {
             firing_buckets: buckets(firing_distribution, SAMPLES),
             firing_distribution,
-            distances: HashMap::new(),
-            movement_range: Vec::new(),
             movement_time: 10f32,
             firing_time: 30f32,
             remaining_time: 100f32,
             time: 100f32,
+            movement_data: Default::default(),
         }
     }
 }
@@ -554,31 +620,40 @@ fn hover_system(
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>)>,
 ) {
     let hex_grid = hex_grid.into_inner();
-    for _ in cursor_events.iter() {
+    // Since we want the highlighted hex to update on camera movement we don't use the cursor event.
+    for cursor_event in cursor_events.iter() {
+        #[cfg(debug_assertions)]
+        println!("cursor event received");
+
         let window = windows.get_primary().expect("no primary window");
-        if let Some(cursor_position) = window.cursor_position() {
-            let cursor_position =
-                cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
-            // print!("{}",cursor_position);
+        let cursor_position1 =
+            cursor_event.position - Vec2::new(window.width() / 2., window.height() / 2.);
 
-            // TODO Here we skip our 1st camera (the ui camera) do this better
-            let (camera_transform, _) = camera_query.iter().nth(1).unwrap();
-            let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
-            // println!("cursor_position: {:?}", cursor_position);
+        // TODO Here we skip our 1st camera (the ui camera) do this better
+        let (camera_transform, _) = camera_query.iter().nth(1).unwrap();
+        let cursor_position2 = normalize_cursor_position(cursor_position1, camera_transform);
 
-            let indices = hex_grid.index(cursor_position.to_array());
-            // println!("hover: {:?}",indices);
-            match indices {
-                // If both logical pixel coordinates can be mapped to hexes within our hex grid
-                Some([x, y]) => {
-                    hex_grid
-                        .highlight_cell(&mut commands, [x, y], HOVER_COLOUR)
-                        .unwrap();
-                }
-                // If either logical pixel coordinates are outside our hex grid
-                _ => {
-                    hex_grid.remove_highlight(&mut commands, HOVER_COLOUR);
-                }
+        #[cfg(debug_assertions)]
+        println!(
+            "received cursor_positions: {:.0}->{:.0}->{:.0}",
+            cursor_event.position, cursor_position1, cursor_position2
+        );
+
+        let index = hex_grid.index(cursor_position2.to_array());
+
+        #[cfg(debug_assertions)]
+        println!("index: {:?}", index);
+
+        match index {
+            // If both logical pixel coordinates can be mapped to hexes within our hex grid
+            Some([x, y]) => {
+                hex_grid
+                    .highlight_cell(&mut commands, [x, y], HOVER_COLOUR)
+                    .unwrap();
+            }
+            // If either logical pixel coordinates are outside our hex grid
+            _ => {
+                hex_grid.remove_highlight(&mut commands, HOVER_COLOUR);
             }
         }
     }
@@ -649,11 +724,8 @@ fn unit_movement_system(
         if let Some(selected_unit) = selected_entity.0 {
             let (_, unit, _) = query.get_mut(hex_grid[selected_unit].entity()).unwrap();
             let unit = unit.into_inner();
-            // De-spawns old movement range components
-            for entity in unit.movement_range.iter() {
-                commands.entity(*entity).despawn();
-            }
-            unit.movement_range = Vec::new();
+            // De-spawns old movement components
+            clear_reachable(unit, &mut commands);
         }
         // Remove selected unit
         selected_entity.0 = None;
@@ -705,7 +777,7 @@ fn unit_movement_system(
                     // println!("unit: {:?}",unit);
 
                     // Gets distance to this new position (it will be `None` if the position is not reachable)
-                    if let Some(&distance) = unit.distances.get(&indices) {
+                    if let Some(&distance) = unit.movement_data.reachable_tiles.get(&indices) {
                         // println!("distance: {:?}->{:?}={}",selected,indices,distance);
 
                         // Gets logical pixel coordinates of new hex position
@@ -793,19 +865,64 @@ fn unit_movement_system(
 }
 /// Clears all reachable tiles for a given [`Unit`].
 fn clear_reachable(unit: &mut Unit, commands: &mut Commands) {
-    for entity in unit.movement_range.iter() {
-        commands.entity(*entity).despawn();
-    }
-    unit.movement_range = Vec::new();
+    unit.movement_data.clear(commands);
 }
+/// Spawns hex returning the entity.
+fn spawn_hex([x, y]: [f32; 2], colour: Color, commands: &mut Commands) -> Entity {
+    commands
+        .spawn_bundle(GeometryBuilder::build_as(
+            &bevy_prototype_lyon::shapes::RegularPolygon {
+                sides: 6,
+                center: Vec2::new(x, y),
+                feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
+            },
+            DrawMode::Outlined {
+                fill_mode: FillMode::color(colour),
+                outline_mode: StrokeMode::new(colour, HEX_OUTLINE_WIDTH),
+            },
+            Transform::default(),
+        ))
+        .id()
+}
+/// Spawns text returning the entity.
+fn spawn_text(
+    text: String,
+    [x, y]: [f32; 2],
+    font_size: f32,
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+) -> Entity {
+    commands
+        .spawn_bundle(Text2dBundle {
+            text: Text::with_section(
+                text,
+                TextStyle {
+                    font: asset_server.load("SmoochSans-Light.ttf"),
+                    font_size,
+                    color: Color::WHITE,
+                },
+                TextAlignment {
+                    vertical: VerticalAlign::Center,
+                    horizontal: HorizontalAlign::Center,
+                },
+            ),
+            transform: Transform {
+                translation: Vec3::new(x, y, 0f32),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .id()
+}
+
 /// The colour used to highlight reachable tiles.
 const REACHABLE_COLOR: Color = Color::rgba(0., 1., 0., 0.1);
 /// The font size of unit remaining time displayed on reachable tiles.
-const MOVEMENT_TIME_REMAINING_FONT_SIZE: f32 = 20f32;
+const MOVEMENT_TIME_REMAINING_FONT_SIZE: f32 = 25f32;
 /// The font size of possible remaining shots displayed on reachable tiles.
 const MOVEMENT_SHOTS_REMAINING_FONT_SIZE: f32 = 40f32;
 /// Spacing between possible shots and remaining unit time displayed on reachable tiles.
-const REACHABLE_TEXT_SPACING: f32 = 5f32;
+const REACHABLE_TEXT_SPACING: f32 = 2f32;
 /// The zoom range within which to display remaining time units on a units reachable tiles.
 const ZOOM_DISPLAY_TIME_RANGE: std::ops::RangeTo<f32> = ..1.5f32;
 fn render_reachable(
@@ -820,9 +937,10 @@ fn render_reachable(
     // Gets reachable positions
     let fringes = hex_grid.reachable(hex, max_movement);
     // Updates distances to all reachable positions
-    let distances = fringes
+    let reachable_tiles = fringes
         .iter()
         .enumerate()
+        .skip(1)
         .flat_map(|(distance, fringe)| {
             fringe
                 .iter()
@@ -830,97 +948,47 @@ fn render_reachable(
                 .collect::<Vec<_>>()
         })
         .collect::<HashMap<_, _>>();
-    unit.distances = distances;
     // Sets new movement range components
-    let highlight_entities = fringes
-        .into_iter()
-        .enumerate()
-        .skip(1)
-        .flat_map(|(distance, hexes)| {
-            let time_remaining_after_move =
-                unit.remaining_time - unit.movement_time * distance as f32;
-            let shots_remaining = (time_remaining_after_move / unit.firing_time) as usize;
-            hexes
-                .into_iter()
-                .flat_map(|reachable_hex| {
-                    let [x, y] = hex_grid.logical_pixels(reachable_hex).unwrap();
-                    // println!("pos: {:?}", [x, y]);
-                    let highlight = commands
-                        .spawn_bundle(GeometryBuilder::build_as(
-                            &bevy_prototype_lyon::shapes::RegularPolygon {
-                                sides: 6,
-                                center: Vec2::new(x, y),
-                                feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
-                            },
-                            DrawMode::Outlined {
-                                fill_mode: FillMode::color(REACHABLE_COLOR),
-                                outline_mode: StrokeMode::new(REACHABLE_COLOR, HEX_OUTLINE_WIDTH),
-                            },
-                            Transform::default(),
-                        ))
-                        .id();
-                    let shots_text = commands
-                        .spawn_bundle(Text2dBundle {
-                            text: Text::with_section(
-                                shots_remaining.to_string(),
-                                TextStyle {
-                                    font: asset_server.load("SmoochSans-Light.ttf"),
-                                    font_size: MOVEMENT_SHOTS_REMAINING_FONT_SIZE,
-                                    color: Color::WHITE,
-                                },
-                                TextAlignment {
-                                    vertical: VerticalAlign::Center,
-                                    horizontal: HorizontalAlign::Center,
-                                },
-                            ),
-                            transform: Transform {
-                                translation: Vec3::new(
-                                    x,
-                                    y + MOVEMENT_TIME_REMAINING_FONT_SIZE / 2f32,
-                                    0f32,
-                                ),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        })
-                        .id();
-                    // If within zoom display range, display remaining unit time.
-                    if ZOOM_DISPLAY_TIME_RANGE.contains(&camera_transform.scale.to_array()[0]) {
-                        let distance_text = commands
-                            .spawn_bundle(Text2dBundle {
-                                text: Text::with_section(
-                                    format!("{:.0}", time_remaining_after_move),
-                                    TextStyle {
-                                        font: asset_server.load("SmoochSans-Light.ttf"),
-                                        font_size: MOVEMENT_TIME_REMAINING_FONT_SIZE,
-                                        color: Color::WHITE,
-                                    },
-                                    TextAlignment {
-                                        vertical: VerticalAlign::Center,
-                                        horizontal: HorizontalAlign::Center,
-                                    },
-                                ),
-                                transform: Transform {
-                                    translation: Vec3::new(
-                                        x,
-                                        y - MOVEMENT_TIME_REMAINING_FONT_SIZE / 2f32
-                                            - REACHABLE_TEXT_SPACING,
-                                        0f32,
-                                    ),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            })
-                            .id();
-                        vec![highlight, distance_text, shots_text]
-                    } else {
-                        vec![highlight, shots_text]
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    unit.movement_range = highlight_entities;
+    let mut time_remaining_after_move = unit.remaining_time;
+
+    let mut tile_highlights = Vec::new();
+    let mut remaining_time = Vec::new();
+    let mut possible_shots = Vec::new();
+
+    for tiles in fringes.into_iter().skip(1) {
+        time_remaining_after_move -= unit.movement_time;
+        let possible_shots_after_move = time_remaining_after_move / unit.firing_time;
+        for tile in tiles.into_iter() {
+            let [x, y] = hex_grid.logical_pixels(tile).unwrap();
+            tile_highlights.push(spawn_hex([x, y], REACHABLE_COLOR, commands));
+            possible_shots.push(spawn_text(
+                (possible_shots_after_move as u32).to_string(),
+                [x, y + MOVEMENT_TIME_REMAINING_FONT_SIZE / 2f32],
+                MOVEMENT_SHOTS_REMAINING_FONT_SIZE,
+                commands,
+                asset_server,
+            ));
+            // If within zoom display range, display remaining unit time.
+            if ZOOM_DISPLAY_TIME_RANGE.contains(&camera_transform.scale.to_array()[0]) {
+                remaining_time.push(spawn_text(
+                    (time_remaining_after_move as u32).to_string(),
+                    [
+                        x,
+                        y - MOVEMENT_TIME_REMAINING_FONT_SIZE / 2f32 - REACHABLE_TEXT_SPACING,
+                    ],
+                    MOVEMENT_TIME_REMAINING_FONT_SIZE,
+                    commands,
+                    asset_server,
+                ));
+            }
+        }
+    }
+    unit.movement_data = MovementData {
+        reachable_tiles,
+        tile_highlights,
+        remaining_time,
+        possible_shots,
+    };
 }
 
 use bevy::input::mouse::MouseWheel;
@@ -929,6 +997,12 @@ fn camera_movement_system(
     keys: Res<Input<KeyCode>>,
     mut scroll_events: EventReader<MouseWheel>,
     mut camera_query: Query<(&mut Transform, With<bevy::prelude::Camera>)>,
+    mut unit_query: Query<&mut Unit>,
+    mut commands: Commands,
+    mut cursor_events: EventWriter<CursorMoved>,
+    windows: Res<Windows>,
+    asset_server: Res<AssetServer>,
+    selected_entity: ResMut<SelectedUnitOption>,
     hex_grid: Res<HexGrid<HexItem>>,
 ) {
     // println!("\n");
@@ -941,6 +1015,9 @@ fn camera_movement_system(
         let temp = camera_transform.translation[1] + 10f32;
         if temp < hex_grid.logical_pixel_bounds[1].end {
             camera_transform.translation[1] = temp;
+            // When moving the camera also update the highlighted text based on the new cursor
+            //  position.
+            trigger_cursor_event(&mut cursor_events, &windows);
         }
     }
     if keys.pressed(KeyCode::S) || keys.pressed(KeyCode::Down) {
@@ -949,6 +1026,9 @@ fn camera_movement_system(
         let temp = camera_transform.translation[1] - 10f32;
         if temp > hex_grid.logical_pixel_bounds[1].start {
             camera_transform.translation[1] = temp;
+            // When moving the camera also update the highlighted text based on the new cursor
+            //  position.
+            trigger_cursor_event(&mut cursor_events, &windows);
         }
     }
     if keys.pressed(KeyCode::A) || keys.pressed(KeyCode::Left) {
@@ -957,6 +1037,9 @@ fn camera_movement_system(
         let temp = camera_transform.translation[0] - 10f32;
         if temp > hex_grid.logical_pixel_bounds[0].start {
             camera_transform.translation[0] = temp;
+            // When moving the camera also update the highlighted text based on the new cursor
+            //  position.
+            trigger_cursor_event(&mut cursor_events, &windows);
         }
     }
     if keys.pressed(KeyCode::D) || keys.pressed(KeyCode::Right) {
@@ -965,12 +1048,40 @@ fn camera_movement_system(
         let temp = camera_transform.translation[0] + 10f32;
         if temp < hex_grid.logical_pixel_bounds[0].end {
             camera_transform.translation[0] = temp;
+            // When moving the camera also update the highlighted text based on the new cursor
+            //  position.
+            trigger_cursor_event(&mut cursor_events, &windows);
         }
     }
     for scroll_event in scroll_events.iter() {
         let temp = camera_transform.scale - (scroll_event.y / 10f32);
+        // If new zoom is within limited zoom range, update camera zoom.
         if (MIN_ZOOM..MAX_ZOOM).contains(&temp[0]) {
             camera_transform.scale = temp;
+            if let Some(selected_entity) = selected_entity.0 {
+                let unit = unit_query
+                    .get_mut(hex_grid[selected_entity].entity())
+                    .unwrap()
+                    .into_inner();
+                // Within zoom display range for remaining time on tiles show this
+                if ZOOM_DISPLAY_TIME_RANGE.contains(&temp[0]) {
+                    unit.show_time(&hex_grid, &mut commands, &asset_server);
+                } else {
+                    unit.movement_data.clear_time(&mut commands);
+                }
+            }
+        }
+    }
+    fn trigger_cursor_event(cursor_events: &mut EventWriter<CursorMoved>, windows: &Windows) {
+        let window = windows.get_primary().expect("no primary window");
+        if let Some(cursor_position) = window.cursor_position() {
+            #[cfg(debug_assertions)]
+            println!("cursor event sent");
+
+            cursor_events.send(CursorMoved {
+                id: window.id(),
+                position: cursor_position,
+            });
         }
     }
 }
@@ -1060,7 +1171,7 @@ fn firing_system<
                     .unwrap()
                     .into_inner();
                 // If unit hasn't already fired this turn
-                if unit.remaining_time > unit.firing_time {
+                if unit.remaining_time >= unit.firing_time {
                     let theta = unit.firing_distribution.sample(&mut rand::thread_rng());
 
                     let [ax, ay] = hex_grid.logical_pixels(selected).unwrap();
@@ -1124,29 +1235,9 @@ fn firing_system<
                         // Adds firing path sprites
                         firing_path.0 = hex_path
                             .into_iter()
-                            .map(|hex| {
-                                let hex_coords = hex_grid.logical_pixels(hex).unwrap();
-                                commands
-                                    .spawn_bundle(GeometryBuilder::build_as(
-                                        &bevy_prototype_lyon::shapes::RegularPolygon {
-                                            sides: 6,
-                                            center: Vec2::from(hex_coords),
-                                            feature: RegularPolygonFeature::SideLength(
-                                                HEX_SIDE_LENGTH,
-                                            ),
-                                        },
-                                        DrawMode::Outlined {
-                                            fill_mode: FillMode::color(Color::rgba(
-                                                1., 1., 1., 0.2,
-                                            )),
-                                            outline_mode: StrokeMode::new(
-                                                Color::rgba(1., 1., 1., 0.2),
-                                                HEX_OUTLINE_WIDTH,
-                                            ),
-                                        },
-                                        Transform::default(),
-                                    ))
-                                    .id()
+                            .map(|index| {
+                                let hex = hex_grid.logical_pixels(index).unwrap();
+                                spawn_hex(hex, Color::rgba(1., 1., 1., 0.2), &mut commands)
                             })
                             .collect::<Vec<_>>();
                     }
