@@ -1,14 +1,14 @@
 #![allow(incomplete_features)]
 #![feature(adt_const_params)]
 #![feature(const_fn_floating_point_arithmetic)]
-use bevy::prelude::*;
+use bevy::{input::mouse::MouseWheel, prelude::*};
 use bevy_kira_audio::{Audio, AudioPlugin};
 use bevy_prototype_lyon::prelude::*;
 use rand_distr::Distribution;
 use std::collections::{HashMap, HashSet};
 
 /// Colour of lasers shot by units.
-const LASER_COLOUR: [f32; 3] = [1f32, 0f32, 0f32];
+const LASER_COLOUR: Color = Color::rgba(1f32, 0f32, 0f32, 1f32);
 /// Background colour.
 const BACKGROUND_COLOUR: Color = Color::rgb(0f32, 0f32, 0f32);
 /// Colour highlight on selected units.
@@ -32,25 +32,30 @@ const HEX_WIDTH: f32 = 3f32 * HEX_SIDE_LENGTH / 2f32;
 /// Height of hexagons used to form the map.
 const HEX_HEIGHT: f32 = (SQRT_3 / 2f32) * (HEX_SIDE_LENGTH / 0.5f32);
 /// Colour of hexagons used to form the map.
-const HEX_COLOR: Color = Color::rgba(1f32, 1f32, 1f32, 0.3f32);
+const HEX_COLOR: Color = Color::rgba(1f32, 1f32, 1f32, 0f32);
 /// Colour of outline of hexagons used to form the map.
-const HEX_OUTLINE_COLOR: Color = Color::rgba(0f32, 0f32, 0f32, 0.1f32);
-/// Size of player units.
-const UNIT_SIZE: f32 = 30f32;
+const HEX_OUTLINE_COLOR: Color = Color::rgba(0f32, 0f32, 0f32, 0.2f32);
+/// Samples to take from firing distributions to approximate firing accuracies.
+const SAMPLES: usize = 10000;
+/// Fill colour of obstructed tiles on map.
+const OBSTRUCTION_HEX_COLOUR: Color = Color::rgba(1f32, 1f32, 1f32, 1f32);
+/// Outline colour of obstructed tiles on the map.
+const OBSTACLE_HEX_OUTLINE_COLOUR: Color = Color::rgba(0f32, 0f32, 0f32, 0.5f32);
+/// Firing lines colour.
+const FIRING_PATH_COLOUR: Color = Color::rgba(1., 1., 1., 0.2);
+/// Z position of firing lines.
+const FIRING_LINE_Z: f32 = 5f32;
+/// Width of laser rectangles.
+const LASER_WIDTH: f32 = 3f32;
 
-fn main() {
-    App::new()
-        .insert_resource(ClearColor(BACKGROUND_COLOUR))
-        .add_plugins(DefaultPlugins)
-        .add_plugin(ShapePlugin)
-        .add_plugin(AudioPlugin)
-        .add_startup_system(setup)
-        .add_system(unit_movement_system)
-        .add_system(camera_movement_system)
-        .add_system(hover_system)
-        .add_system(turnover_system)
-        .add_system(firing_system::<LASER_COLOUR, 4f32, 0.05f32, 1f32, 0.05f32>)
-        .run();
+/// Converts a value in 0..1 to a value in 0..256
+const fn icolour(x: f32) -> Result<u8, &'static str> {
+    // match (0f32..1f32).contains(&x)
+    // Bc below `std::ops::Range::contains` isn't const.
+    match x > 0f32 && x < 1f32 {
+        true => Ok((x * 255f32) as u8),
+        false => Err("Float outside range 0..1"),
+    }
 }
 
 /// An hexagon grid.
@@ -63,6 +68,126 @@ struct HexGrid<T: std::fmt::Debug> {
     pub logical_pixel_bounds: [std::ops::Range<f32>; 2],
     /// A mapping of colour highlights to their respective entity.
     highlights: HashMap<Colour, Entity>,
+}
+
+impl HexGrid<HexItem> {
+    fn add_enemy(
+        &mut self,
+        commands: &mut Commands,
+        component: EnemyUnit,
+        index: [usize; 2],
+        asset_server: &AssetServer,
+    ) {
+        #[cfg(debug_assertions)]
+        println!("add_enemy() started");
+        let [x, y] = self.logical_pixels(index).unwrap();
+        let new_entity = commands
+            .spawn_bundle(SpriteBundle {
+                transform: Transform {
+                    translation: Vec3::from((x, y, 1f32)),
+                    scale: Vec3::new(0.15f32, 0.15f32, 1f32),
+                    ..Default::default()
+                },
+                // sprite: Sprite {
+                //     color: Color::rgb(1., 1., 1.),
+                //     ..Default::default()
+                // },
+                texture: asset_server.load("bad-guy.png"),
+                ..Default::default()
+            })
+            .insert(component)
+            .id();
+        self[index] = HexItem::Enemy(new_entity);
+
+        #[cfg(debug_assertions)]
+        println!("add_enemy() finished");
+    }
+    fn add_unit(
+        &mut self,
+        commands: &mut Commands,
+        component: Unit,
+        index: [usize; 2],
+        asset_server: &AssetServer,
+    ) {
+        #[cfg(debug_assertions)]
+        println!("add_unit() started");
+        let [x, y] = self.logical_pixels(index).unwrap();
+        let new_entity = commands
+            .spawn_bundle(SpriteBundle {
+                transform: Transform {
+                    translation: Vec3::from((x, y, 1f32)),
+                    scale: Vec3::new(0.15f32, 0.15f32, 1f32),
+                    ..Default::default()
+                },
+                // sprite: Sprite {
+                //     color: Color::rgb(1., 1., 1.),
+                //     ..Default::default()
+                // },
+                texture: asset_server.load("guy.png"),
+                ..Default::default()
+            })
+            .insert(component)
+            .id();
+        self[index] = HexItem::Entity(new_entity);
+
+        #[cfg(debug_assertions)]
+        println!("add_unit() finished");
+    }
+    fn add_obstruction(
+        &mut self,
+        commands: &mut Commands,
+        index: [usize; 2],
+        asset_server: &AssetServer,
+    ) {
+        let [x, y] = self.logical_pixels(index).unwrap();
+        // Elements higher up on the y axis we want to be behind elements lower down, thus we subtract this from the z dimension.
+        let z_adj = y as f32 / self.logical_pixel_bounds[1].end;
+        println!("y: {:?}, z_adj: {}", y, z_adj);
+        // spawn_hex(
+        //     [x,y],
+        //     OBSTRUCTION_HEX_COLOUR,
+        //     OBSTACLE_HEX_OUTLINE_COLOUR,
+        //     commands,
+        // );
+        commands.spawn_bundle(SpriteBundle {
+            transform: Transform {
+                translation: Vec3::from((x, y, 2f32 - z_adj)),
+                scale: Vec3::new(0.5f32, 0.5f32, 1f32),
+                ..Default::default()
+            },
+            // sprite: Sprite {
+            //     color: Color::rgb(1., 1., 1.),
+            //     ..Default::default()
+            // },
+            texture: asset_server.load("rock.png"),
+            ..Default::default()
+        });
+        self[index] = HexItem::Obstruction;
+    }
+    /// Returns a 2d vec of reachable indices from the given index (where `vec[x][2]` denotes the an index reachable in `x` steps).
+    fn reachable(&self, start: [usize; 2], movement: usize) -> Vec<Vec<[usize; 2]>> {
+        let mut visited = HashSet::new();
+        visited.insert(start);
+        let mut fringes = vec![vec![start]];
+        for k in 0..movement {
+            let mut temp = Vec::new();
+            for hex in fringes[k].iter() {
+                for dir in 0..6 {
+                    let neighbor_opt = self.neighbor(*hex, dir);
+                    // If neighbor exists
+                    if let Some(neighbor) = neighbor_opt {
+                        // If neighbor has not been visited and is not blocked
+                        if !visited.contains(&neighbor) && self[neighbor].is_empty() {
+                            visited.insert(neighbor);
+                            temp.push(neighbor);
+                        }
+                    }
+                }
+            }
+            fringes.push(temp);
+        }
+        fringes
+    }
 }
 impl<T: std::fmt::Debug + Default + Copy> HexGrid<T> {
     /// `HexGrid::<i32>::new(4,2)` produces:
@@ -90,70 +215,6 @@ impl<T: std::fmt::Debug + Default + Copy> HexGrid<T> {
         this
     }
 }
-impl<T: std::fmt::Debug> std::ops::Index<[usize; 2]> for HexGrid<T> {
-    type Output = T;
-    /// In a `2x4` hex grid the corresponding indices would be:
-    /// ```text
-    ///  ___     ___
-    /// ╱0,0╲___╱2,0╲___
-    /// ╲___╱1,0╲___╱3,0╲
-    /// ╱0,1╲___╱2,1╲___╱
-    /// ╲___╱1,1╲___╱3,1╲
-    ///     ╲___╱   ╲___╱
-    /// ```
-    fn index(&self, [x, y]: [usize; 2]) -> &Self::Output {
-        &self.data[y * self.width + x]
-    }
-}
-impl<T: std::fmt::Debug> std::ops::IndexMut<[usize; 2]> for HexGrid<T> {
-    /// In a `2x4` hex grid the corresponding indices would be:
-    /// ```text
-    ///  ___     ___
-    /// ╱0,0╲___╱2,0╲___
-    /// ╲___╱1,0╲___╱3,0╲
-    /// ╱0,1╲___╱2,1╲___╱
-    /// ╲___╱1,1╲___╱3,1╲
-    ///     ╲___╱   ╲___╱
-    /// ```
-    fn index_mut(&mut self, [x, y]: [usize; 2]) -> &mut Self::Output {
-        &mut self.data[y * self.width + x]
-    }
-}
-/// A wrapper around [`Color`](https://docs.rs/bevy/latest/bevy/render/color/enum.Color.html) to implement [`std::hash::Hash`].
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Colour(Color);
-/// While this is not technically true, this is necessary to hash it and be useful.
-impl Eq for Colour {}
-impl std::hash::Hash for Colour {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        icolour(self.0.r()).hash(state);
-        icolour(self.0.g()).hash(state);
-        icolour(self.0.b()).hash(state);
-        icolour(self.0.a()).hash(state);
-    }
-}
-impl From<[f32; 4]> for Colour {
-    fn from(x: [f32; 4]) -> Self {
-        Self(Color::from(x))
-    }
-}
-impl std::ops::Deref for Colour {
-    type Target = Color;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-/// Converts a value in 0..1 to a value in 0..256
-const fn icolour(x: f32) -> Result<u8, &'static str> {
-    // match (0f32..1f32).contains(&x)
-    // Bc below `std::ops::Range::contains` isn't const.
-    match x > 0f32 && x < 1f32 {
-        true => Ok((x * 255f32) as u8),
-        false => Err("Float outside range 0..1"),
-    }
-}
-
 impl<T: std::fmt::Debug> HexGrid<T> {
     /// Gets logical pixel coordinates of center of hex of a given index, returning `None` if the
     ///  given coordinates do not correspond to a hex in the grid.
@@ -194,14 +255,15 @@ impl<T: std::fmt::Debug> HexGrid<T> {
         x < self.width && y < self.height
     }
     /// Render background hexagons on grid.
-    fn spawn_background(&self, commands: &mut Commands) {
+    fn spawn_background(&self, commands: &mut Commands, asset_server: &AssetServer) {
         #[cfg(debug_assertions)]
         println!("spawn_background() started");
 
         for y in 0..self.height {
             for x in 0..self.width {
                 let [cx, cy] = self.logical_pixels([x, y]).unwrap();
-
+                // Spawns hex guide
+                // -----------------------------------
                 commands.spawn_bundle(GeometryBuilder::build_as(
                     &bevy_prototype_lyon::shapes::RegularPolygon {
                         sides: 6,
@@ -214,6 +276,24 @@ impl<T: std::fmt::Debug> HexGrid<T> {
                     },
                     Transform::default(),
                 ));
+                // Spawns background texture sprites
+                // -----------------------------------
+                // Elements higher up on the y axis we want to be behind elements lower down, thus we subtract this from the z dimension.
+                let z_adj = (y as f32 / self.logical_pixel_bounds[1].end)
+                    + (x as f32 / self.logical_pixel_bounds[0].end);
+                commands.spawn_bundle(SpriteBundle {
+                    transform: Transform {
+                        translation: Vec3::from((cx, cy, 0f32 - z_adj)),
+                        scale: Vec3::new(0.43f32, 0.43f32, 1f32),
+                        ..Default::default()
+                    },
+                    // sprite: Sprite {
+                    //     color: Color::rgb(1., 1., 1.),
+                    //     ..Default::default()
+                    // },sd
+                    texture: asset_server.load("grass-hex.png"),
+                    ..Default::default()
+                });
             }
         }
 
@@ -248,7 +328,7 @@ impl<T: std::fmt::Debug> HexGrid<T> {
             let removed = self.remove_highlight(commands, colour);
 
             let hex = self.logical_pixels(index).unwrap();
-            let highlight = spawn_hex(hex, *colour, commands);
+            let highlight = spawn_hex(hex, *colour, *colour, commands);
             self.highlights.insert(colour, highlight);
             Ok(removed)
         } else {
@@ -335,61 +415,58 @@ impl<T: std::fmt::Debug> HexGrid<T> {
     }
 }
 
-const OBSTRUCTION_HEX_COLOUR: Color = Color::rgba(1., 1., 1., 1.);
-
-impl HexGrid<HexItem> {
-    fn add_unit(&mut self, commands: &mut Commands, component: Unit, index: [usize; 2]) {
-        #[cfg(debug_assertions)]
-        println!("add_unit() started");
-        let [x, y] = self.logical_pixels(index).unwrap();
-        let new_entity = commands
-            .spawn_bundle(SpriteBundle {
-                transform: Transform {
-                    translation: Vec3::from((x, y, 0f32)),
-                    scale: Vec3::new(UNIT_SIZE, UNIT_SIZE, 0.),
-                    ..Default::default()
-                },
-                sprite: Sprite {
-                    color: Color::rgb(1., 1., 1.),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .insert(component)
-            .id();
-        self[index] = HexItem::Entity(new_entity);
-
-        #[cfg(debug_assertions)]
-        println!("add_unit() finished");
+impl<T: std::fmt::Debug> std::ops::Index<[usize; 2]> for HexGrid<T> {
+    type Output = T;
+    /// In a `2x4` hex grid the corresponding indices would be:
+    /// ```text
+    ///  ___     ___
+    /// ╱0,0╲___╱2,0╲___
+    /// ╲___╱1,0╲___╱3,0╲
+    /// ╱0,1╲___╱2,1╲___╱
+    /// ╲___╱1,1╲___╱3,1╲
+    ///     ╲___╱   ╲___╱
+    /// ```
+    fn index(&self, [x, y]: [usize; 2]) -> &Self::Output {
+        &self.data[y * self.width + x]
     }
-    fn add_obstruction(&mut self, commands: &mut Commands, index: [usize; 2]) {
-        let hex = self.logical_pixels(index).unwrap();
-        spawn_hex(hex, OBSTRUCTION_HEX_COLOUR, commands);
-        self[index] = HexItem::Obstruction;
+}
+impl<T: std::fmt::Debug> std::ops::IndexMut<[usize; 2]> for HexGrid<T> {
+    /// In a `2x4` hex grid the corresponding indices would be:
+    /// ```text
+    ///  ___     ___
+    /// ╱0,0╲___╱2,0╲___
+    /// ╲___╱1,0╲___╱3,0╲
+    /// ╱0,1╲___╱2,1╲___╱
+    /// ╲___╱1,1╲___╱3,1╲
+    ///     ╲___╱   ╲___╱
+    /// ```
+    fn index_mut(&mut self, [x, y]: [usize; 2]) -> &mut Self::Output {
+        &mut self.data[y * self.width + x]
     }
-    /// Returns a 2d vec of reachable indices from the given index (where `vec[x][2]` denotes the an index reachable in `x` steps).
-    fn reachable(&self, start: [usize; 2], movement: usize) -> Vec<Vec<[usize; 2]>> {
-        let mut visited = HashSet::new();
-        visited.insert(start);
-        let mut fringes = vec![vec![start]];
-        for k in 0..movement {
-            let mut temp = Vec::new();
-            for hex in fringes[k].iter() {
-                for dir in 0..6 {
-                    let neighbor_opt = self.neighbor(*hex, dir);
-                    // If neighbor exists
-                    if let Some(neighbor) = neighbor_opt {
-                        // If neighbor has not been visited and is not blocked
-                        if !visited.contains(&neighbor) && self[neighbor].is_empty() {
-                            visited.insert(neighbor);
-                            temp.push(neighbor);
-                        }
-                    }
-                }
-            }
-            fringes.push(temp);
-        }
-        fringes
+}
+/// A wrapper around [`Color`](https://docs.rs/bevy/latest/bevy/render/color/enum.Color.html) to implement [`std::hash::Hash`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Colour(Color);
+/// While this is not technically true, this is necessary to hash it and be useful.
+impl Eq for Colour {}
+impl std::hash::Hash for Colour {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        icolour(self.0.r()).hash(state);
+        icolour(self.0.g()).hash(state);
+        icolour(self.0.b()).hash(state);
+        icolour(self.0.a()).hash(state);
+    }
+}
+impl From<[f32; 4]> for Colour {
+    fn from(x: [f32; 4]) -> Self {
+        Self(Color::from(x))
+    }
+}
+impl std::ops::Deref for Colour {
+    type Target = Color;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -400,10 +477,12 @@ struct MapDescriptor {
     player_spawns: Vec<[usize; 2]>,
     enemy_spawns: Vec<[usize; 2]>,
 }
+
 /// The data we store associated with each tile of the hex grid.
 #[derive(Debug, Copy, Clone)]
 enum HexItem {
     Entity(Entity),
+    Enemy(Entity),
     Empty,
     Obstruction,
 }
@@ -423,74 +502,14 @@ impl Default for HexItem {
         Self::Empty
     }
 }
-/// Sets up initial system state.
-fn setup(mut commands: Commands) {
-    #[cfg(debug_assertions)]
-    println!("setup() started");
-    // cameras
-    commands.spawn_bundle(OrthographicCameraBundle::new_2d());
-    commands.spawn_bundle(UiCameraBundle::default());
-    // Shoots remain on screen for 0.5 seconds
-    commands.insert_resource(Lasers::<LASER_COLOUR>::default());
 
-    // Background
-    let grid_height = 20;
-    let grid_width = 39;
-
-    let mut hex_grid = HexGrid::new(grid_width, grid_height);
-    hex_grid.spawn_background(&mut commands);
-
-    // Adds some obstructions
-    let map: MapDescriptor =
-        serde_json::from_str(&std::fs::read_to_string("map.json").unwrap()).unwrap();
-
-    for hex in map.obstacles.into_iter() {
-        hex_grid.add_obstruction(&mut commands, hex);
-    }
-    #[cfg(debug_assertions)]
-    println!("spawned obstructions");
-
-    let mut units = Vec::new();
-    for hex in map.player_spawns {
-        println!("hex: {:?}", hex);
-        units.push((Unit::default(), hex));
-    }
-    // let units = map
-    //     .player_spawns
-    //     .into_iter()
-    //     .map(|hex| (Unit::default(), hex))
-    //     .collect::<Vec<_>>();
-
-    #[cfg(debug_assertions)]
-    println!("units: {:?}", units);
-
-    // Add units
-    // ----------------------------------------------------
-
-    #[cfg(debug_assertions)]
-    println!("started spawning units");
-
-    for (unit, index) in units.into_iter() {
-        hex_grid.add_unit(&mut commands, unit, index);
-    }
-    #[cfg(debug_assertions)]
-    println!("spawned units");
-
-    commands.insert_resource(hex_grid);
-    commands.insert_resource(SelectedUnitOption::default());
-    commands.insert_resource(FiringLines::default());
-    #[cfg(debug_assertions)]
-    commands.insert_resource(FiringPath::default());
-
-    #[cfg(debug_assertions)]
-    println!("setup() finished");
-}
 /// The list of all [`Laser`]s present on screen.
 #[derive(Debug, Default)]
-struct Lasers<const COLOUR: [f32; 3]>(Vec<Laser<COLOUR>>);
+struct Lasers(Vec<Laser>);
+
 /// Data associated with a laser projectile after being fired by a unit.
 #[derive(Debug, Clone)]
-struct Laser<const COLOUR: [f32; 3]> {
+struct Laser {
     entity: Entity,
     opacity: f32,
     // Opacity decay every tick
@@ -499,26 +518,44 @@ struct Laser<const COLOUR: [f32; 3]> {
     from: Vec2,
     to: Vec2,
 }
-impl<const COLOUR: [f32; 3]> std::ops::Deref for Lasers<COLOUR> {
-    type Target = Vec<Laser<COLOUR>>;
+impl std::ops::Deref for Lasers {
+    type Target = Vec<Laser>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
-impl<const COLOUR: [f32; 3]> std::ops::DerefMut for Lasers<COLOUR> {
+impl std::ops::DerefMut for Lasers {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
+
 /// The entities associated with cursor aiming a unit.
 #[derive(Default, Debug)]
 struct FiringLines(Vec<Entity>);
+
 /// The entities associated with displaying the tiles a projection crossed post a unit firing a weapon (for the moment this is only fof debug mode).
 #[derive(Default, Debug)]
 struct FiringPath(Vec<Entity>);
+
 /// The current user selected unit.
 #[derive(Default, Debug)]
 struct SelectedUnitOption(Option<[usize; 2]>);
+
+#[derive(Component,Debug,Default)]
+struct EnemyUnit(Unit);
+impl std::ops::Deref for EnemyUnit {
+    type Target = Unit;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for EnemyUnit {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 /// A player or AI controlled unit/soldier/pawn.
 #[derive(Component, Debug)]
 struct Unit {
@@ -563,6 +600,22 @@ impl Unit {
         }
     }
 }
+impl Default for Unit {
+    fn default() -> Self {
+        let firing_distribution = rand_distr::Normal::new(0f32, 0.07f32).unwrap();
+        Self {
+            firing_buckets: buckets(firing_distribution, SAMPLES),
+            firing_distribution,
+            movement_time: 10f32,
+            firing_time: 30f32,
+            remaining_time: 100f32,
+            time: 100f32,
+            movement_data: Default::default(),
+        }
+    }
+}
+
+/// Data associated with movement of a unit.
 #[derive(Debug, Default)]
 struct MovementData {
     // Distances to all reachable points from current position.
@@ -594,21 +647,107 @@ impl MovementData {
         self.remaining_time = Vec::new();
     }
 }
-/// Samples to take from firing distributions to approximate firing accuracies.
-const SAMPLES: usize = 10000;
-impl Default for Unit {
-    fn default() -> Self {
-        let firing_distribution = rand_distr::Normal::new(0f32, 0.07f32).unwrap();
-        Self {
-            firing_buckets: buckets(firing_distribution, SAMPLES),
-            firing_distribution,
-            movement_time: 10f32,
-            firing_time: 30f32,
-            remaining_time: 100f32,
-            time: 100f32,
-            movement_data: Default::default(),
-        }
+
+fn main() {
+    App::new()
+        .insert_resource(ClearColor(BACKGROUND_COLOUR))
+        .add_plugins(DefaultPlugins)
+        .add_plugin(ShapePlugin)
+        .add_plugin(AudioPlugin)
+        .add_startup_system(setup)
+        .add_system(unit_movement_system)
+        .add_system(camera_movement_system)
+        .add_system(hover_system)
+        .add_system(turnover_system)
+        .add_system(firing_system::<0.05f32, 0.05f32>)
+        .run();
+}
+
+/// Sets up initial system state.
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>, audio: Res<Audio>) {
+    let asset_server = asset_server.into_inner();
+    #[cfg(debug_assertions)]
+    println!("setup() started");
+    // cameras
+    commands.spawn_bundle(OrthographicCameraBundle::new_2d());
+    commands.spawn_bundle(UiCameraBundle::default());
+    // Shoots remain on screen for 0.5 seconds
+    commands.insert_resource(Lasers::default());
+
+    // Background
+    let grid_height = 20;
+    let grid_width = 39;
+
+    let mut hex_grid = HexGrid::new(grid_width, grid_height);
+    hex_grid.spawn_background(&mut commands, asset_server);
+
+    // Adds some obstructions
+    let map: MapDescriptor =
+        serde_json::from_str(&std::fs::read_to_string("map.json").unwrap()).unwrap();
+
+    for hex in map.obstacles.into_iter() {
+        hex_grid.add_obstruction(&mut commands, hex, asset_server);
     }
+    #[cfg(debug_assertions)]
+    println!("spawned obstructions");
+
+    let mut units = Vec::new();
+    for hex in map.player_spawns {
+        println!("hex: {:?}", hex);
+        units.push((Unit::default(), hex));
+    }
+    // let units = map
+    //     .player_spawns
+    //     .into_iter()
+    //     .map(|hex| (Unit::default(), hex))
+    //     .collect::<Vec<_>>();
+
+    let mut enemy_units = Vec::new();
+    for hex in map.enemy_spawns {
+        println!("hex: {:?}", hex);
+        enemy_units.push((EnemyUnit::default(), hex));
+    }
+
+    #[cfg(debug_assertions)]
+    println!("units: {:?}", units);
+
+    // Add units
+    // ----------------------------------------------------
+
+    #[cfg(debug_assertions)]
+    println!("started spawning units");
+
+    for (unit, index) in units.into_iter() {
+        hex_grid.add_unit(&mut commands, unit, index, asset_server);
+    }
+    #[cfg(debug_assertions)]
+    println!("spawned units");
+
+    #[cfg(debug_assertions)]
+    println!("started spawning enemies");
+    for (enemy, index) in enemy_units.into_iter() {
+        hex_grid.add_enemy(&mut commands, enemy, index, asset_server);
+    }
+    #[cfg(debug_assertions)]
+    println!("spawned enemies");
+
+    commands.insert_resource(hex_grid);
+    commands.insert_resource(SelectedUnitOption::default());
+    commands.insert_resource(FiringLines::default());
+    #[cfg(debug_assertions)]
+    commands.insert_resource(FiringPath::default());
+
+    // Play background music
+    let channel = bevy_kira_audio::AudioChannel::new(String::from("background-music"));
+    audio.set_volume_in_channel(0.1, &channel);
+    audio.play_looped_in_channel(
+        asset_server
+            .load("XCOM-Enemy-Unknown-Soundtrack-HQ-Act-1-Extended-Michael-McCann-YouTube.mp3"),
+        &channel,
+    );
+
+    #[cfg(debug_assertions)]
+    println!("setup() finished");
 }
 
 /// Handles highlighting the tile the user's cursor is hovering over.
@@ -663,6 +802,7 @@ fn hover_system(
 fn normalize_cursor_position(pos: Vec2, camera_transform: &Transform) -> Vec2 {
     (pos * camera_transform.scale.truncate()) + camera_transform.translation.truncate()
 }
+
 /// Handles game turn over e.g. clicking "next turn".
 fn turnover_system(
     keys: Res<Input<KeyCode>>,
@@ -783,7 +923,7 @@ fn unit_movement_system(
                         // Gets logical pixel coordinates of new hex position
                         let [new_x, new_y] = hex_grid.logical_pixels(indices).unwrap();
                         // Moves entity to new hex
-                        transform.into_inner().translation = Vec3::from((new_x, new_y, 0f32));
+                        transform.into_inner().translation = Vec3::from((new_x, new_y, 1f32));
                         // Sets new hex entity ref
                         hex_grid[indices] = hex_grid[selected];
                         // Removes entity ref from old new
@@ -863,12 +1003,19 @@ fn unit_movement_system(
         }
     }
 }
+
 /// Clears all reachable tiles for a given [`Unit`].
 fn clear_reachable(unit: &mut Unit, commands: &mut Commands) {
     unit.movement_data.clear(commands);
 }
+
 /// Spawns hex returning the entity.
-fn spawn_hex([x, y]: [f32; 2], colour: Color, commands: &mut Commands) -> Entity {
+fn spawn_hex(
+    [x, y]: [f32; 2],
+    fill_colour: Color,
+    outline_colour: Color,
+    commands: &mut Commands,
+) -> Entity {
     commands
         .spawn_bundle(GeometryBuilder::build_as(
             &bevy_prototype_lyon::shapes::RegularPolygon {
@@ -877,13 +1024,14 @@ fn spawn_hex([x, y]: [f32; 2], colour: Color, commands: &mut Commands) -> Entity
                 feature: RegularPolygonFeature::SideLength(HEX_SIDE_LENGTH),
             },
             DrawMode::Outlined {
-                fill_mode: FillMode::color(colour),
-                outline_mode: StrokeMode::new(colour, HEX_OUTLINE_WIDTH),
+                fill_mode: FillMode::color(fill_colour),
+                outline_mode: StrokeMode::new(outline_colour, HEX_OUTLINE_WIDTH),
             },
             Transform::default(),
         ))
         .id()
 }
+
 /// Spawns text returning the entity.
 fn spawn_text(
     text: String,
@@ -960,7 +1108,12 @@ fn render_reachable(
         let possible_shots_after_move = time_remaining_after_move / unit.firing_time;
         for tile in tiles.into_iter() {
             let [x, y] = hex_grid.logical_pixels(tile).unwrap();
-            tile_highlights.push(spawn_hex([x, y], REACHABLE_COLOR, commands));
+            tile_highlights.push(spawn_hex(
+                [x, y],
+                REACHABLE_COLOR,
+                REACHABLE_COLOR,
+                commands,
+            ));
             possible_shots.push(spawn_text(
                 (possible_shots_after_move as u32).to_string(),
                 [x, y + MOVEMENT_TIME_REMAINING_FONT_SIZE / 2f32],
@@ -991,7 +1144,6 @@ fn render_reachable(
     };
 }
 
-use bevy::input::mouse::MouseWheel;
 /// System handling camera movement
 fn camera_movement_system(
     keys: Res<Input<KeyCode>>,
@@ -1087,17 +1239,11 @@ fn camera_movement_system(
 }
 
 /// Handles units firing weapons.
-fn firing_system<
-    const SHOT_COLOUR: [f32; 3],
-    const SHOT_WIDTH: f32,
-    const SHOT_SECONDS: f32,
-    const SHOT_OPACITY: f32,
-    const SHOT_DECAY: f32,
->(
+fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
     time: Res<Time>,
     selected_entity: ResMut<SelectedUnitOption>,
     camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>)>,
-    mut unit_query: Query<&mut Unit>,
+    mut unit_query: Query<(&mut Unit, &mut Transform)>,
     windows: Res<Windows>,
     hex_grid: ResMut<HexGrid<HexItem>>,
     mut commands: Commands,
@@ -1106,12 +1252,12 @@ fn firing_system<
     mut cursor_events: EventReader<CursorMoved>,
     asset_server: Res<AssetServer>,
     keys: Res<Input<KeyCode>>,
-    lasers: ResMut<Lasers<SHOT_COLOUR>>,
+    lasers: ResMut<Lasers>,
     audio: Res<Audio>,
 ) {
     let firing_line = firing_line.into_inner();
     let hex_grid = hex_grid.into_inner();
-    // Checks timer on all rendered lasers on whether to remove them
+    // Decays all rendered lasers and updates timers.
     let lasers = lasers.into_inner();
     lasers.0 = lasers
         .iter()
@@ -1128,18 +1274,15 @@ fn firing_system<
                 } else {
                     laser.opacity -= laser.decay;
                     // Renders new entity
-                    let shot_colour = Color::rgba(
-                        SHOT_COLOUR[0],
-                        SHOT_COLOUR[1],
-                        SHOT_COLOUR[2],
-                        laser.opacity,
-                    );
+                    let mut shot_colour = LASER_COLOUR;
+                    shot_colour.set_a(laser.opacity);
+
                     laser.entity = commands
                         .spawn_bundle(GeometryBuilder::build_as(
                             &bevy_prototype_lyon::shapes::Line(laser.from, laser.to),
                             DrawMode::Outlined {
                                 fill_mode: FillMode::color(shot_colour),
-                                outline_mode: StrokeMode::new(shot_colour, SHOT_WIDTH),
+                                outline_mode: StrokeMode::new(shot_colour, LASER_WIDTH),
                             },
                             Transform {
                                 translation: Vec3::new(0f32, 0f32, 3f32),
@@ -1155,25 +1298,30 @@ fn firing_system<
         })
         .collect::<Vec<_>>();
 
-    // TODO This hit detection super janky, make it better.
-    // If user pressed f key
+    // When the user presses the `f` key on their keyboard.
     if keys.just_pressed(KeyCode::F) {
+        // We get the position of the cursor in the primary window.
         let window = windows.get_primary().expect("no primary window");
         if let Some(cursor_position) = window.cursor_position() {
-            let cursor_position =
-                cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
-            let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
-            let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
-
+            // If the user has some selected entity
             if let Some(selected) = selected_entity.0 {
+                // Gets unit entity refers to.
                 let unit = unit_query
                     .get_mut(hex_grid[selected].entity())
                     .unwrap()
+                    .0
                     .into_inner();
-                // If unit hasn't already fired this turn
+                // If unit has enough time units left to fire.
                 if unit.remaining_time >= unit.firing_time {
+                    // Corrects cursor position
+                    let cursor_position =
+                        cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
+                    let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
+                    let cursor_position =
+                        normalize_cursor_position(cursor_position, camera_transform);
+                    // Samples unit firing distribution getting the shot angle offset.
                     let theta = unit.firing_distribution.sample(&mut rand::thread_rng());
-
+                    // Gets shot related data.
                     let [ax, ay] = hex_grid.logical_pixels(selected).unwrap();
                     let [bx, by] = cursor_position.to_array();
                     let [cx, cy] = rotate_point_around_point([ax, ay], [bx, by], theta);
@@ -1202,7 +1350,7 @@ fn firing_system<
                             match hex_grid[hex] {
                                 HexItem::Empty => {
                                     continue;
-                                }
+                                },
                                 HexItem::Entity(entity) => {
                                     audio.set_volume(0.2);
                                     audio.play(asset_server.load("zapsplat_multimedia_game_sound_monster_hit_impact_kill_warp_weird_78163.mp3"));
@@ -1212,8 +1360,11 @@ fn firing_system<
                                     commands.entity(entity).despawn();
 
                                     break;
-                                }
+                                },
                                 HexItem::Obstruction => {
+                                    break;
+                                },
+                                HexItem::Enemy(_) => {
                                     break;
                                 }
                             }
@@ -1237,23 +1388,28 @@ fn firing_system<
                             .into_iter()
                             .map(|index| {
                                 let hex = hex_grid.logical_pixels(index).unwrap();
-                                spawn_hex(hex, Color::rgba(1., 1., 1., 0.2), &mut commands)
+                                spawn_hex(
+                                    hex,
+                                    FIRING_PATH_COLOUR,
+                                    FIRING_PATH_COLOUR,
+                                    &mut commands,
+                                )
                             })
                             .collect::<Vec<_>>();
                     }
 
+                    // TODO Fix so shot starts from edge of hex not center.
                     // Draws shot (since I don't want to handle animation a bullet, its a laser which appears for a couple frames)
-                    let shot_colour =
-                        Color::rgba(SHOT_COLOUR[0], SHOT_COLOUR[1], SHOT_COLOUR[2], SHOT_OPACITY);
                     let from = Vec2::from([ax, ay]);
+                    // TODO Fix to so it doesn't end before hitting the grid edge or obstacle.
                     let to = current;
                     lasers.push(Laser {
                         entity: commands
                             .spawn_bundle(GeometryBuilder::build_as(
                                 &bevy_prototype_lyon::shapes::Line(from, to),
                                 DrawMode::Outlined {
-                                    fill_mode: FillMode::color(shot_colour),
-                                    outline_mode: StrokeMode::new(shot_colour, SHOT_WIDTH),
+                                    fill_mode: FillMode::color(LASER_COLOUR),
+                                    outline_mode: StrokeMode::new(LASER_COLOUR, LASER_WIDTH),
                                 },
                                 Transform {
                                     translation: Vec3::new(0f32, 0f32, 3f32),
@@ -1262,7 +1418,7 @@ fn firing_system<
                             ))
                             .id(),
                         decay: SHOT_DECAY,
-                        opacity: SHOT_OPACITY,
+                        opacity: LASER_COLOUR.a(),
                         timer: Timer::from_seconds(SHOT_SECONDS, true),
                         from,
                         to,
@@ -1288,8 +1444,8 @@ fn firing_system<
             }
         }
     }
-    // TODO Use cursor position from `_ev` instead of `window`.
-    for _ev in cursor_events.iter() {
+    // When the user moves their cursor we update the firing lines
+    for cursor_event in cursor_events.iter() {
         // println!(
         //     "New cursor position: X: {}, Y: {}, in Window ID: {:?}",
         //     ev.position.x, ev.position.y, ev.id
@@ -1301,135 +1457,132 @@ fn firing_system<
         }
         firing_line.0 = Vec::new();
 
-        let window = windows.get_primary().expect("no primary window");
-        // If cursor has position in window
-        if let Some(cursor_position) = window.cursor_position() {
+        if let Some(selected) = selected_entity.0 {
+            let window = windows.get(cursor_event.id).unwrap();
             let cursor_position =
-                cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
+                cursor_event.position - Vec2::new(window.width() / 2., window.height() / 2.);
             let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
             // Get cursor right position relative to camera
             let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
-            if let Some(selected) = selected_entity.0 {
-                // Get the pixels corresponding to the center of the hex `selected` on the grid.
-                let hex = hex_grid.logical_pixels(selected).unwrap();
-                let extended_bounds = {
-                    let [x, y] = hex_grid.logical_pixel_bounds.clone();
-                    // We expand bounds so line is drawn to edge and doesn't end at edge hex
-                    let [w, h] = [HEX_WIDTH, HEX_HEIGHT];
-                    [x.start - w..x.end + w, y.start - h..y.end + h]
-                };
-                // Calculate end point
 
-                let center = end_point(
+            // Get the pixels corresponding to the center of the hex `selected` on the grid.
+            let hex = hex_grid.logical_pixels(selected).unwrap();
+            let extended_bounds = {
+                let [x, y] = hex_grid.logical_pixel_bounds.clone();
+                // We expand bounds so line is drawn to edge and doesn't end at edge hex
+                let [w, h] = [HEX_WIDTH, HEX_HEIGHT];
+                [x.start - w..x.end + w, y.start - h..y.end + h]
+            };
+
+            // Center firing line
+            let center = end_point(
+                hex,
+                cursor_position.to_array(),
+                extended_bounds.clone(),
+                0f32,
+            );
+            // Calculates offset firing lines
+            let points = vec![
+                end_point(
                     hex,
                     cursor_position.to_array(),
                     extended_bounds.clone(),
-                    0f32,
-                );
-                let points = vec![
-                    end_point(
-                        hex,
-                        cursor_position.to_array(),
-                        extended_bounds.clone(),
-                        0.02f32,
-                    ),
-                    end_point(
-                        hex,
-                        cursor_position.to_array(),
-                        extended_bounds.clone(),
-                        -0.02f32,
-                    ),
-                    end_point(
-                        hex,
-                        cursor_position.to_array(),
-                        extended_bounds.clone(),
-                        0.1f32,
-                    ),
-                    end_point(
-                        hex,
-                        cursor_position.to_array(),
-                        extended_bounds.clone(),
-                        -0.1f32,
-                    ),
-                ];
+                    0.02f32,
+                ),
+                end_point(
+                    hex,
+                    cursor_position.to_array(),
+                    extended_bounds.clone(),
+                    -0.02f32,
+                ),
+                end_point(
+                    hex,
+                    cursor_position.to_array(),
+                    extended_bounds.clone(),
+                    0.1f32,
+                ),
+                end_point(
+                    hex,
+                    cursor_position.to_array(),
+                    extended_bounds.clone(),
+                    -0.1f32,
+                ),
+            ];
 
-                let draw = DrawMode::Outlined {
-                    fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.3)),
-                    outline_mode: StrokeMode::new(Color::rgba(0., 0., 0., 0.3), HEX_OUTLINE_WIDTH),
-                };
-                let transform = Transform {
-                    translation: Vec3::new(0f32, 0f32, 2f32),
-                    ..Default::default()
-                };
-                let mut lines = points
-                    .into_iter()
-                    .map(|p| {
-                        commands
-                            .spawn_bundle(GeometryBuilder::build_as(
-                                &bevy_prototype_lyon::shapes::Line(Vec2::from(hex), Vec2::from(p)),
-                                draw.clone(),
-                                transform.clone(),
-                            ))
-                            .id()
-                    })
-                    .collect::<Vec<_>>();
-                lines.push(
+            let draw = DrawMode::Outlined {
+                fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.3)),
+                outline_mode: StrokeMode::new(Color::rgba(0., 0., 0., 0.3), HEX_OUTLINE_WIDTH),
+            };
+            let transform = Transform {
+                translation: Vec3::new(0f32, 0f32, FIRING_LINE_Z),
+                ..Default::default()
+            };
+            assert!(transform.translation.is_finite(), "Firing line error");
+            let mut lines = points
+                .into_iter()
+                .map(|p| {
                     commands
                         .spawn_bundle(GeometryBuilder::build_as(
-                            &bevy_prototype_lyon::shapes::Line(Vec2::from(hex), Vec2::from(center)),
-                            DrawMode::Outlined {
-                                fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.1)),
-                                outline_mode: StrokeMode::new(
-                                    Color::rgba(0., 0., 0., 0.1),
-                                    HEX_OUTLINE_WIDTH,
-                                ),
-                            },
+                            &bevy_prototype_lyon::shapes::Line(Vec2::from(hex), Vec2::from(p)),
+                            draw.clone(),
                             transform.clone(),
                         ))
-                        .id(),
-                );
-                let unit = unit_query.get(hex_grid[selected].entity()).unwrap();
-                let firing_accuracy_text = commands
-                    .spawn_bundle(Text2dBundle {
-                        text: Text::with_section(
-                            format!(
-                                "{:.0}% {:.0}% {:.0}%",
-                                unit.firing_buckets[0] * 100f32,
-                                unit.firing_buckets[1] * 100f32,
-                                unit.firing_buckets[2] * 100f32
+                        .id()
+                })
+                .collect::<Vec<_>>();
+            lines.push(
+                commands
+                    .spawn_bundle(GeometryBuilder::build_as(
+                        &bevy_prototype_lyon::shapes::Line(Vec2::from(hex), Vec2::from(center)),
+                        DrawMode::Outlined {
+                            fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.1)),
+                            outline_mode: StrokeMode::new(
+                                Color::rgba(0., 0., 0., 0.1),
+                                HEX_OUTLINE_WIDTH,
                             ),
-                            TextStyle {
-                                font: asset_server.load("SmoochSans-Bold.ttf"),
-                                font_size: 40.0,
-                                color: Color::RED,
-                            },
-                            TextAlignment {
-                                vertical: VerticalAlign::Center,
-                                horizontal: HorizontalAlign::Center,
-                            },
-                        ),
-                        transform: Transform {
-                            translation: Vec3::new(hex[0], hex[1] + 50f32, 10f32),
-                            ..Default::default()
                         },
+                        transform.clone(),
+                    ))
+                    .id(),
+            );
+            let (unit, transform) = unit_query.get_mut(hex_grid[selected].entity()).unwrap();
+            // Adds firing accuracies
+            let firing_accuracy_text = commands
+                .spawn_bundle(Text2dBundle {
+                    text: Text::with_section(
+                        format!(
+                            "{:.0}% {:.0}% {:.0}%",
+                            unit.firing_buckets[0] * 100f32,
+                            unit.firing_buckets[1] * 100f32,
+                            unit.firing_buckets[2] * 100f32
+                        ),
+                        TextStyle {
+                            font: asset_server.load("SmoochSans-Bold.ttf"),
+                            font_size: 40.0,
+                            color: Color::RED,
+                        },
+                        TextAlignment {
+                            vertical: VerticalAlign::Center,
+                            horizontal: HorizontalAlign::Center,
+                        },
+                    ),
+                    transform: Transform {
+                        translation: Vec3::new(hex[0], hex[1] + 50f32, 10f32),
                         ..Default::default()
-                    })
-                    .id();
-                lines.push(firing_accuracy_text);
-                firing_line.0 = lines;
-            }
+                    },
+                    ..Default::default()
+                })
+                .id();
+            lines.push(firing_accuracy_text);
+            firing_line.0 = lines;
+            // Rotates sprite
+            let [x, y] = cursor_position.to_array();
+            let angle = (y - hex[1]).atan2(x - hex[0]);
+            assert!(angle.is_finite(), "Unit rotation error");
+            transform.into_inner().rotation = Quat::from_rotation_z(angle);
         }
     }
 }
-// fn angle_between_two_points([ax, ay]: [f32; 2], [bx, by]: [f32; 2]) -> f32 {
-//     let delta_x = ax - bx;
-//     let delta_y = ay - by;
-//     let radians = delta_y.atan2(delta_x);
-//     radians
-// }
-// fn cartesian_distance([ax, ay]: [f32; 2], [bx, by]: [f32; 2]) -> f32 {
-//     ((ax as f32 - bx as f32).powi(2) + (ay as f32 - by as f32).powi(2)).sqrt()
-// }
 
 /// Returns a point on line from `a` through `c` (where `c` is `b` rotated about `a` by `theta` radians) that lies on the `bounds`.
 ///
@@ -1460,6 +1613,7 @@ fn end_point(
         (true, false) => [max(fy(y.end), x.start), min(y.end, fx(x.start))],
     }
 }
+
 /// Rotates a given point `b` around a given point `a` by a some number of radians `theta`
 fn rotate_point_around_point([ax, ay]: [f32; 2], [bx, by]: [f32; 2], theta: f32) -> [f32; 2] {
     let dx = bx - ax;
@@ -1469,6 +1623,7 @@ fn rotate_point_around_point([ax, ay]: [f32; 2], [bx, by]: [f32; 2], theta: f32)
         dx * theta.sin() + dy * theta.cos() + ay,
     ]
 }
+
 /// [`std::cmp::max`] supporting f32
 fn max(a: f32, b: f32) -> f32 {
     if a > b {
@@ -1477,6 +1632,7 @@ fn max(a: f32, b: f32) -> f32 {
         b
     }
 }
+
 /// [`std::cmp::min`] supporting f32
 fn min(a: f32, b: f32) -> f32 {
     if a < b {
@@ -1485,6 +1641,7 @@ fn min(a: f32, b: f32) -> f32 {
         b
     }
 }
+
 /// Returns the probability of sampling specific ranges of values from a given distribution.
 ///
 /// The buckets being:
