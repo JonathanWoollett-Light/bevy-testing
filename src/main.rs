@@ -70,6 +70,51 @@ struct HexGrid<T: std::fmt::Debug> {
     highlights: HashMap<Colour, Entity>,
 }
 
+#[derive(Debug, Component)]
+struct Animation {
+    timer: Timer,
+    frames: std::iter::Cycle<std::vec::IntoIter<bevy::prelude::Handle<Image>>>,
+}
+impl Animation {
+    fn from_dir(path: &str, asset_server: &AssetServer) -> std::io::Result<Self> {
+        let path = std::path::Path::new(&path);
+        assert!(path.is_dir());
+
+        let mut frames = Vec::new();
+
+        // Orders paths alphabetically
+        let mut paths = path
+            .read_dir()?
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        // println!("paths: {:?}",paths);
+
+        for image_path in paths {
+            assert_eq!(image_path.extension().unwrap(), "png");
+            let relative_path = format!("../{}", image_path.display());
+            // println!("relative_path: {}",relative_path);
+
+            frames.push(asset_server.load(&relative_path))
+        }
+        assert!(!frames.is_empty());
+        Ok(Self {
+            timer: Timer::from_seconds(0.3f32, true),
+            frames: frames.into_iter().cycle(),
+        })
+    }
+    fn tick(&mut self, step: bevy::utils::Duration) -> Option<Handle<Image>> {
+        if self.timer.tick(step).just_finished() {
+            self.frames.next()
+        } else {
+            None
+        }
+    }
+}
+const UNIT_SPRITE_SINGLE: &'static str = "units/enemy1idle1.png";
+const UNIT_SPRITE_PATH: &'static str = "./assets/units";
+const ENEMY_SPRITE_SINGLE: &'static str = "enemy/enemy3idle1.png";
+const ENEMY_SPRITE_PATH: &'static str = "./assets/enemy";
 impl HexGrid<HexItem> {
     fn add_enemy(
         &mut self,
@@ -85,23 +130,25 @@ impl HexGrid<HexItem> {
             .spawn_bundle(SpriteBundle {
                 transform: Transform {
                     translation: Vec3::from((x, y, 1f32)),
-                    scale: Vec3::new(0.15f32, 0.15f32, 1f32),
+                    scale: Vec3::new(1f32, 1f32, 1f32),
                     ..Default::default()
                 },
                 // sprite: Sprite {
                 //     color: Color::rgb(1., 1., 1.),
                 //     ..Default::default()
                 // },
-                texture: asset_server.load("bad-guy.png"),
+                texture: asset_server.load(ENEMY_SPRITE_SINGLE),
                 ..Default::default()
             })
             .insert(component)
+            .insert(Animation::from_dir(ENEMY_SPRITE_PATH, asset_server).unwrap())
             .id();
         self[index] = HexItem::Enemy(new_entity);
 
         #[cfg(debug_assertions)]
         println!("add_enemy() finished");
     }
+
     fn add_unit(
         &mut self,
         commands: &mut Commands,
@@ -116,17 +163,14 @@ impl HexGrid<HexItem> {
             .spawn_bundle(SpriteBundle {
                 transform: Transform {
                     translation: Vec3::from((x, y, 1f32)),
-                    scale: Vec3::new(0.15f32, 0.15f32, 1f32),
+                    scale: Vec3::new(1f32, 1f32, 1f32),
                     ..Default::default()
                 },
-                // sprite: Sprite {
-                //     color: Color::rgb(1., 1., 1.),
-                //     ..Default::default()
-                // },
-                texture: asset_server.load("guy.png"),
+                texture: asset_server.load(UNIT_SPRITE_SINGLE),
                 ..Default::default()
             })
             .insert(component)
+            .insert(Animation::from_dir(UNIT_SPRITE_PATH, asset_server).unwrap())
             .id();
         self[index] = HexItem::Entity(new_entity);
 
@@ -542,7 +586,7 @@ struct FiringPath(Vec<Entity>);
 #[derive(Default, Debug)]
 struct SelectedUnitOption(Option<[usize; 2]>);
 
-#[derive(Component,Debug,Default)]
+#[derive(Component, Debug, Default)]
 struct EnemyUnit(Unit);
 impl std::ops::Deref for EnemyUnit {
     type Target = Unit;
@@ -660,6 +704,7 @@ fn main() {
         .add_system(hover_system)
         .add_system(turnover_system)
         .add_system(firing_system::<0.05f32, 0.05f32>)
+        .add_system(animation_system)
         .run();
 }
 
@@ -1238,6 +1283,29 @@ fn camera_movement_system(
     }
 }
 
+fn animation_system(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut unit_query: Query<(Entity, &mut Animation, &Transform)>,
+) {
+    unit_query.for_each_mut(|(entity, animation, transform)| {
+        let animation = animation.into_inner();
+        let delta = time.delta();
+        if let Some(handle) = animation.tick(delta) {
+            // Removes old sprite
+            commands.entity(entity).remove_bundle::<SpriteBundle>();
+            // println!("unit hit {:?}",delta);
+            // Adds new sprite
+            commands.entity(entity).insert_bundle(SpriteBundle {
+                transform: *transform,
+                texture: handle,
+                visibility: bevy::render::view::Visibility { is_visible: true },
+                ..Default::default()
+            });
+            // sprite_bundle.texture
+        }
+    });
+}
 /// Handles units firing weapons.
 fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
     time: Res<Time>,
@@ -1350,7 +1418,7 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                             match hex_grid[hex] {
                                 HexItem::Empty => {
                                     continue;
-                                },
+                                }
                                 HexItem::Entity(entity) => {
                                     audio.set_volume(0.2);
                                     audio.play(asset_server.load("zapsplat_multimedia_game_sound_monster_hit_impact_kill_warp_weird_78163.mp3"));
@@ -1360,10 +1428,10 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                                     commands.entity(entity).despawn();
 
                                     break;
-                                },
+                                }
                                 HexItem::Obstruction => {
                                     break;
-                                },
+                                }
                                 HexItem::Enemy(_) => {
                                     break;
                                 }
@@ -1509,6 +1577,8 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                 ),
             ];
 
+            #[cfg(debug_assertions)]
+            println!("updating firing lines");
             let draw = DrawMode::Outlined {
                 fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.3)),
                 outline_mode: StrokeMode::new(Color::rgba(0., 0., 0., 0.3), HEX_OUTLINE_WIDTH),
@@ -1530,10 +1600,18 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                         .id()
                 })
                 .collect::<Vec<_>>();
+            #[cfg(debug_assertions)]
+            println!("updated firing lines");
+
+            #[cfg(debug_assertions)]
+            println!("updating center firing line");
+            let (from, to) = (Vec2::from(hex), Vec2::from(center));
+            assert!(from.is_finite());
+            assert!(to.is_finite());
             lines.push(
                 commands
                     .spawn_bundle(GeometryBuilder::build_as(
-                        &bevy_prototype_lyon::shapes::Line(Vec2::from(hex), Vec2::from(center)),
+                        &bevy_prototype_lyon::shapes::Line(from, to),
                         DrawMode::Outlined {
                             fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.1)),
                             outline_mode: StrokeMode::new(
@@ -1545,6 +1623,8 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                     ))
                     .id(),
             );
+            #[cfg(debug_assertions)]
+            println!("updated center firing lines");
             let (unit, transform) = unit_query.get_mut(hex_grid[selected].entity()).unwrap();
             // Adds firing accuracies
             let firing_accuracy_text = commands
@@ -1575,14 +1655,20 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                 .id();
             lines.push(firing_accuracy_text);
             firing_line.0 = lines;
+
             // Rotates sprite
+            println!("updating unit angle");
             let [x, y] = cursor_position.to_array();
             let angle = (y - hex[1]).atan2(x - hex[0]);
-            assert!(angle.is_finite(), "Unit rotation error");
-            transform.into_inner().rotation = Quat::from_rotation_z(angle);
+            let offset_angle = angle + ANGLE_PINT_OFFSET;
+            assert!(offset_angle.is_finite(), "Unit rotation error");
+            transform.into_inner().rotation = Quat::from_rotation_z(offset_angle);
+            println!("updated unit firing angle");
         }
     }
 }
+// Offset add to selected unit sprite rotation relative to cursor position angle.
+const ANGLE_PINT_OFFSET: f32 = std::f32::consts::PI / 2f32;
 
 /// Returns a point on line from `a` through `c` (where `c` is `b` rotated about `a` by `theta` radians) that lies on the `bounds`.
 ///
