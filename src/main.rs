@@ -32,15 +32,15 @@ const HEX_WIDTH: f32 = 3f32 * HEX_SIDE_LENGTH / 2f32;
 /// Height of hexagons used to form the map.
 const HEX_HEIGHT: f32 = (SQRT_3 / 2f32) * (HEX_SIDE_LENGTH / 0.5f32);
 /// Colour of hexagons used to form the map.
-const HEX_COLOR: Color = Color::rgba(1f32, 1f32, 1f32, 0f32);
+const HEX_COLOR: Color = Color::rgba(1f32, 1f32, 1f32, 0.6f32);
 /// Colour of outline of hexagons used to form the map.
 const HEX_OUTLINE_COLOR: Color = Color::rgba(0f32, 0f32, 0f32, 0.2f32);
 /// Samples to take from firing distributions to approximate firing accuracies.
-const SAMPLES: usize = 10000;
+const SAMPLES: usize = 10;
 /// Fill colour of obstructed tiles on map.
 const OBSTRUCTION_HEX_COLOUR: Color = Color::rgba(1f32, 1f32, 1f32, 1f32);
 /// Outline colour of obstructed tiles on the map.
-const OBSTACLE_HEX_OUTLINE_COLOUR: Color = Color::rgba(0f32, 0f32, 0f32, 0.5f32);
+const OBSTACLE_HEX_OUTLINE_COLOUR: Color = Color::rgba(0f32, 0f32, 0f32, 0.8f32);
 /// Firing lines colour.
 const FIRING_PATH_COLOUR: Color = Color::rgba(1., 1., 1., 0.2);
 /// Z position of firing lines.
@@ -70,6 +70,8 @@ struct HexGrid<T: std::fmt::Debug> {
     highlights: HashMap<Colour, Entity>,
 }
 
+use rand::{thread_rng, Rng};
+
 #[derive(Debug, Component)]
 struct Animation {
     timer: Timer,
@@ -98,9 +100,16 @@ impl Animation {
             frames.push(asset_server.load(&relative_path))
         }
         assert!(!frames.is_empty());
+
+        // To avoid animation syncing and looking weird we skip a random number of initial frames.
+        let mut rng = thread_rng();
+        let skip = rng.gen_range(0..frames.len());
+        let mut iter = frames.into_iter().cycle();
+        iter.nth(skip);
+
         Ok(Self {
             timer: Timer::from_seconds(0.3f32, true),
-            frames: frames.into_iter().cycle(),
+            frames: iter,
         })
     }
     fn tick(&mut self, step: bevy::utils::Duration) -> Option<Handle<Image>> {
@@ -187,25 +196,25 @@ impl HexGrid<HexItem> {
         // Elements higher up on the y axis we want to be behind elements lower down, thus we subtract this from the z dimension.
         let z_adj = y as f32 / self.logical_pixel_bounds[1].end;
         println!("y: {:?}, z_adj: {}", y, z_adj);
-        // spawn_hex(
-        //     [x,y],
-        //     OBSTRUCTION_HEX_COLOUR,
-        //     OBSTACLE_HEX_OUTLINE_COLOUR,
-        //     commands,
-        // );
-        commands.spawn_bundle(SpriteBundle {
-            transform: Transform {
-                translation: Vec3::from((x, y, 2f32 - z_adj)),
-                scale: Vec3::new(0.5f32, 0.5f32, 1f32),
-                ..Default::default()
-            },
-            // sprite: Sprite {
-            //     color: Color::rgb(1., 1., 1.),
-            //     ..Default::default()
-            // },
-            texture: asset_server.load("rock.png"),
-            ..Default::default()
-        });
+        spawn_hex(
+            [x,y],
+            OBSTRUCTION_HEX_COLOUR,
+            OBSTACLE_HEX_OUTLINE_COLOUR,
+            commands,
+        );
+        // commands.spawn_bundle(SpriteBundle {
+        //     transform: Transform {
+        //         translation: Vec3::from((x, y, 2f32 - z_adj)),
+        //         scale: Vec3::new(0.5f32, 0.5f32, 1f32),
+        //         ..Default::default()
+        //     },
+        //     // sprite: Sprite {
+        //     //     color: Color::rgb(1., 1., 1.),
+        //     //     ..Default::default()
+        //     // },
+        //     texture: asset_server.load("rock.png"),
+        //     ..Default::default()
+        // });
         self[index] = HexItem::Obstruction;
     }
     /// Returns a 2d vec of reachable indices from the given index (where `vec[x][2]` denotes the an index reachable in `x` steps).
@@ -320,24 +329,24 @@ impl<T: std::fmt::Debug> HexGrid<T> {
                     },
                     Transform::default(),
                 ));
-                // Spawns background texture sprites
-                // -----------------------------------
-                // Elements higher up on the y axis we want to be behind elements lower down, thus we subtract this from the z dimension.
-                let z_adj = (y as f32 / self.logical_pixel_bounds[1].end)
-                    + (x as f32 / self.logical_pixel_bounds[0].end);
-                commands.spawn_bundle(SpriteBundle {
-                    transform: Transform {
-                        translation: Vec3::from((cx, cy, 0f32 - z_adj)),
-                        scale: Vec3::new(0.43f32, 0.43f32, 1f32),
-                        ..Default::default()
-                    },
-                    // sprite: Sprite {
-                    //     color: Color::rgb(1., 1., 1.),
-                    //     ..Default::default()
-                    // },sd
-                    texture: asset_server.load("grass-hex.png"),
-                    ..Default::default()
-                });
+                // // Spawns background texture sprites
+                // // -----------------------------------
+                // // Elements higher up on the y axis we want to be behind elements lower down, thus we subtract this from the z dimension.
+                // let z_adj = (y as f32 / self.logical_pixel_bounds[1].end)
+                //     + (x as f32 / self.logical_pixel_bounds[0].end);
+                // commands.spawn_bundle(SpriteBundle {
+                //     transform: Transform {
+                //         translation: Vec3::from((cx, cy, 0f32 - z_adj)),
+                //         scale: Vec3::new(0.43f32, 0.43f32, 1f32),
+                //         ..Default::default()
+                //     },
+                //     // sprite: Sprite {
+                //     //     color: Color::rgb(1., 1., 1.),
+                //     //     ..Default::default()
+                //     // },sd
+                //     texture: asset_server.load("grass-hex.png"),
+                //     ..Default::default()
+                // });
             }
         }
 
@@ -578,7 +587,8 @@ impl std::ops::DerefMut for Lasers {
 #[derive(Default, Debug)]
 struct FiringLines(Vec<Entity>);
 
-/// The entities associated with displaying the tiles a projection crossed post a unit firing a weapon (for the moment this is only fof debug mode).
+/// The entities associated with displaying the tiles a projection crossed post a unit firing a 
+///  weapon (for the moment this is only fof debug mode).
 #[derive(Default, Debug)]
 struct FiringPath(Vec<Entity>);
 
@@ -600,11 +610,20 @@ impl std::ops::DerefMut for EnemyUnit {
     }
 }
 
+
+// With:
+// - 0 we draw no slices in the firing arc, 
+// - 1 we draw 2 lines which split the firing arc into 2 sections each with 50% chance of a shot lying within them.
+// - 2 we draw 4 lines splitting the firing arc into 4 sections each with a 25% chance of a shot lying within them.
+const DISTRIBUTION_VISIBLE_SECTIONS: usize = 2;
+const VISIBLE_FIRING_STEP: f32 = 1f32 / (DISTRIBUTION_VISIBLE_SECTIONS as f32 + f32::EPSILON);
+
 /// A player or AI controlled unit/soldier/pawn.
 #[derive(Component, Debug)]
 struct Unit {
-    // Percentage of samples from `firing_distribution` that sit within the buckets of [-0.02..0.02,(-1..-0.02 & 0.02..1),(..-1 & 1..)]
-    firing_buckets: [f32; 3],
+    // The angles of lines splitting the firing arc into `DISTRIBUTION_VISIBLE_SECTIONS` slice 
+    //  where each slice has an equal percentage of a shot landing within it.
+    firing_buckets: [f32; DISTRIBUTION_VISIBLE_SECTIONS],
     // Distribution from which we sample our firing inaccuracies.
     firing_distribution: rand_distr::Normal<f32>,
     // Time unit takes to move 1 hex.
@@ -646,9 +665,23 @@ impl Unit {
 }
 impl Default for Unit {
     fn default() -> Self {
-        let firing_distribution = rand_distr::Normal::new(0f32, 0.07f32).unwrap();
+        let firing_distribution = rand_distr::Normal::new(0f32, 0.05f32).unwrap();
+        let buckets = buckets(firing_distribution);
+        println!("buckets: {:.3?}",buckets);
+
+        let mut sections = [0f32; DISTRIBUTION_VISIBLE_SECTIONS];
+        let mut j = 0;
+        for i in 0..DISTRIBUTION_VISIBLE_SECTIONS {
+            let mut percent = 0f32;
+            while percent < VISIBLE_FIRING_STEP && j < DISTRIBUTION_BUCKETS {
+                percent += buckets[j];
+                sections[i] += DISTRIBUTION_SAMPLES_STEP;
+                j += 1;
+            }
+        }
+
         Self {
-            firing_buckets: buckets(firing_distribution, SAMPLES),
+            firing_buckets: sections,
             firing_distribution,
             movement_time: 10f32,
             firing_time: 30f32,
@@ -806,8 +839,8 @@ fn hover_system(
     let hex_grid = hex_grid.into_inner();
     // Since we want the highlighted hex to update on camera movement we don't use the cursor event.
     for cursor_event in cursor_events.iter() {
-        #[cfg(debug_assertions)]
-        println!("cursor event received");
+        // #[cfg(debug_assertions)]
+        // println!("cursor event received");
 
         let window = windows.get_primary().expect("no primary window");
         let cursor_position1 =
@@ -817,16 +850,16 @@ fn hover_system(
         let (camera_transform, _) = camera_query.iter().nth(1).unwrap();
         let cursor_position2 = normalize_cursor_position(cursor_position1, camera_transform);
 
-        #[cfg(debug_assertions)]
-        println!(
-            "received cursor_positions: {:.0}->{:.0}->{:.0}",
-            cursor_event.position, cursor_position1, cursor_position2
-        );
+        // #[cfg(debug_assertions)]
+        // println!(
+        //     "received cursor_positions: {:.0}->{:.0}->{:.0}",
+        //     cursor_event.position, cursor_position1, cursor_position2
+        // );
 
         let index = hex_grid.index(cursor_position2.to_array());
 
-        #[cfg(debug_assertions)]
-        println!("index: {:?}", index);
+        // #[cfg(debug_assertions)]
+        // println!("index: {:?}", index);
 
         match index {
             // If both logical pixel coordinates can be mapped to hexes within our hex grid
@@ -1272,8 +1305,8 @@ fn camera_movement_system(
     fn trigger_cursor_event(cursor_events: &mut EventWriter<CursorMoved>, windows: &Windows) {
         let window = windows.get_primary().expect("no primary window");
         if let Some(cursor_position) = window.cursor_position() {
-            #[cfg(debug_assertions)]
-            println!("cursor event sent");
+            // #[cfg(debug_assertions)]
+            // println!("cursor event sent");
 
             cursor_events.send(CursorMoved {
                 id: window.id(),
@@ -1549,36 +1582,22 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                 extended_bounds.clone(),
                 0f32,
             );
-            // Calculates offset firing lines
-            let points = vec![
-                end_point(
-                    hex,
-                    cursor_position.to_array(),
-                    extended_bounds.clone(),
-                    0.02f32,
-                ),
-                end_point(
-                    hex,
-                    cursor_position.to_array(),
-                    extended_bounds.clone(),
-                    -0.02f32,
-                ),
-                end_point(
-                    hex,
-                    cursor_position.to_array(),
-                    extended_bounds.clone(),
-                    0.1f32,
-                ),
-                end_point(
-                    hex,
-                    cursor_position.to_array(),
-                    extended_bounds.clone(),
-                    -0.1f32,
-                ),
-            ];
 
-            #[cfg(debug_assertions)]
-            println!("updating firing lines");
+            let (unit, unit_transform) = unit_query.get_mut(hex_grid[selected].entity()).unwrap();
+            let unit = unit.into_inner();
+
+            // Calculates offset firing lines
+            let ends_points  = unit.firing_buckets
+                .iter()
+                .flat_map(|angle|[
+                    end_point(hex,cursor_position.to_array(),extended_bounds.clone(),-angle),
+                    end_point(hex,cursor_position.to_array(),extended_bounds.clone(),*angle)
+                ])
+                .collect::<Vec<_>>();
+
+            // #[cfg(debug_assertions)]
+            // println!("updating firing lines");
+
             let draw = DrawMode::Outlined {
                 fill_mode: FillMode::color(Color::rgba(0., 0., 0., 0.3)),
                 outline_mode: StrokeMode::new(Color::rgba(0., 0., 0., 0.3), HEX_OUTLINE_WIDTH),
@@ -1588,7 +1607,7 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                 ..Default::default()
             };
             assert!(transform.translation.is_finite(), "Firing line error");
-            let mut lines = points
+            let mut lines = ends_points
                 .into_iter()
                 .map(|p| {
                     commands
@@ -1600,11 +1619,13 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                         .id()
                 })
                 .collect::<Vec<_>>();
-            #[cfg(debug_assertions)]
-            println!("updated firing lines");
 
-            #[cfg(debug_assertions)]
-            println!("updating center firing line");
+            // #[cfg(debug_assertions)]
+            // println!("updated firing lines");
+
+            // #[cfg(debug_assertions)]
+            // println!("updating center firing line");
+
             let (from, to) = (Vec2::from(hex), Vec2::from(center));
             assert!(from.is_finite());
             assert!(to.is_finite());
@@ -1623,18 +1644,16 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                     ))
                     .id(),
             );
-            #[cfg(debug_assertions)]
-            println!("updated center firing lines");
-            let (unit, transform) = unit_query.get_mut(hex_grid[selected].entity()).unwrap();
+            // #[cfg(debug_assertions)]
+            // println!("updated center firing lines");
+           
             // Adds firing accuracies
             let firing_accuracy_text = commands
                 .spawn_bundle(Text2dBundle {
                     text: Text::with_section(
                         format!(
-                            "{:.0}% {:.0}% {:.0}%",
-                            unit.firing_buckets[0] * 100f32,
-                            unit.firing_buckets[1] * 100f32,
-                            unit.firing_buckets[2] * 100f32
+                            "{}",
+                            unit.firing_buckets.iter().map(|x|format!("{:.0}% ",x * 100f32)).collect::<String>()
                         ),
                         TextStyle {
                             font: asset_server.load("SmoochSans-Bold.ttf"),
@@ -1657,13 +1676,18 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
             firing_line.0 = lines;
 
             // Rotates sprite
-            println!("updating unit angle");
+
+            // #[cfg(debug_assertions)]
+            // println!("updating unit angle");
+
             let [x, y] = cursor_position.to_array();
             let angle = (y - hex[1]).atan2(x - hex[0]);
             let offset_angle = angle + ANGLE_PINT_OFFSET;
             assert!(offset_angle.is_finite(), "Unit rotation error");
-            transform.into_inner().rotation = Quat::from_rotation_z(offset_angle);
-            println!("updated unit firing angle");
+            unit_transform.into_inner().rotation = Quat::from_rotation_z(offset_angle);
+            
+            // #[cfg(debug_assertions)]
+            // println!("updated unit firing angle");
         }
     }
 }
@@ -1728,26 +1752,26 @@ fn min(a: f32, b: f32) -> f32 {
     }
 }
 
+const DISTRIBUTION_BUCKETS: usize = 4;
+const DISTRIBUTIONS_SAMPLES: usize = 100000;
+const DISTRIBUTION_MAX_ANGLE: f32 = std::f32::consts::PI / 2f32;
+const DISTRIBUTION_SAMPLES_STEP: f32 = DISTRIBUTION_MAX_ANGLE / DISTRIBUTION_BUCKETS as f32;
+
 /// Returns the probability of sampling specific ranges of values from a given distribution.
-///
-/// The buckets being:
-/// - `-0.02..0.02`
-/// - `-0.1..-0.02` & `0.02..0.1`
-/// - `..-0.1` & `0.1..`
-fn buckets<D: rand_distr::Distribution<f32>>(dist: D, samples: usize) -> [f32; 3] {
-    let mut buckets = [0; 3];
-    for sample in dist.sample_iter(rand::thread_rng()).take(samples) {
-        if sample < -0.1 || sample > 0.1 {
-            buckets[2] += 1;
-        } else if sample < -0.02 || sample > 0.02 {
-            buckets[1] += 1;
-        } else {
-            buckets[0] += 1;
-        }
+fn buckets<D: rand_distr::Distribution<f32>>(dist: D) -> [f32; DISTRIBUTION_BUCKETS] {
+    let mut buckets = [0; DISTRIBUTION_BUCKETS];
+    // println!();
+    for sample in dist.sample_iter(rand::thread_rng()).take(DISTRIBUTIONS_SAMPLES) {
+        let abs_sample = sample.abs();
+        // print!("{:.2}p,{} ",abs_sample / std::f32::consts::PI,(abs_sample / DISTRIBUTION_SAMPLES_STEP) as usize);
+        let bucket = ((abs_sample / DISTRIBUTION_SAMPLES_STEP) as usize).clamp(0,DISTRIBUTION_BUCKETS);
+        buckets[bucket] += 1;
     }
-    [
-        buckets[0] as f32 / samples as f32,
-        buckets[1] as f32 / samples as f32,
-        buckets[2] as f32 / samples as f32,
-    ]
+    println!("buckets buckets: {:?}",buckets);
+    let mut percentage_buckets = [Default::default();DISTRIBUTION_BUCKETS];
+    for i in 0..DISTRIBUTION_BUCKETS {
+        percentage_buckets[i] = buckets[i] as f32 / DISTRIBUTIONS_SAMPLES as f32;
+    }
+    println!("buckets percentage_buckets: {:.3?}",percentage_buckets);
+    percentage_buckets
 }
