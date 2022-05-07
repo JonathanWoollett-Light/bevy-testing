@@ -282,12 +282,6 @@ fn unit_movement_system(
         selected_entity.0 = None;
         // Remove unit position highlight
         hex_grid.remove_highlight(&mut commands, UNIT_SELECTION_COLOUR);
-
-        // Removes old firing lines
-        for line in firing_line.0.iter() {
-            commands.entity(*line).despawn();
-        }
-        firing_line.0 = Vec::new();
     }
     if buttons.just_pressed(MouseButton::Left) {
         // #[cfg(debug_assertions)]
@@ -360,13 +354,7 @@ fn unit_movement_system(
                                 &asset_server,
                                 *camera_transform,
                             );
-                            // Removes old firing lines
-
-                            for line in firing_line.0.iter() {
-                                commands.entity(*line).despawn();
-                            }
-                            firing_line.0 = Vec::new();
-
+                            // Play movement sound
                             audio.set_volume(0.1);
                             audio.play(asset_server.load("PM_FN_Spawns_Portals_Teleports_5.mp3"));
                         } else {
@@ -416,11 +404,6 @@ fn unit_movement_system(
                         );
                         // Set new selected entity.
                         selected_entity.0 = Some(indices);
-                        // Removes old firing lines
-                        for line in firing_line.0.iter() {
-                            commands.entity(*line).despawn();
-                        }
-                        firing_line.0 = Vec::new();
                     }
                     // If we don't have an entity and we didn't click and entity, do nothing
                     _ => {}
@@ -691,12 +674,12 @@ fn animation_system(
 fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
     time: Res<Time>,
     selected_entity: ResMut<SelectedUnitOption>,
-    camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>)>,
-    mut unit_query: Query<(&mut Unit, &mut Transform)>,
+    camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>,Without<FiringSpread>)>,
+    mut unit_query: Query<(&mut Unit, &mut Transform, Without<FiringSpread>)>,
+    mut firing_spread_query: Query<(&mut FiringSpread, &mut Transform, Without<Unit>)>,
     windows: Res<Windows>,
     hex_grid: ResMut<HexGrid<HexItem>>,
     mut commands: Commands,
-    firing_line: ResMut<FiringLines>,
     #[cfg(debug_assertions)] firing_path: ResMut<FiringPath>,
     mut cursor_events: EventReader<CursorMoved>,
     asset_server: Res<AssetServer>,
@@ -704,7 +687,6 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
     lasers: ResMut<Lasers>,
     audio: Res<Audio>,
 ) {
-    let firing_line = firing_line.into_inner();
     let hex_grid = hex_grid.into_inner();
     // Decays all rendered lasers and updates timers.
     let lasers = lasers.into_inner();
@@ -765,7 +747,7 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                     // Corrects cursor position
                     let cursor_position =
                         cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
-                    let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
+                    let (camera_transform, _, _,_) = camera_query.iter().nth(1).unwrap();
                     let cursor_position =
                         normalize_cursor_position(cursor_position, camera_transform);
                     // Samples unit firing distribution getting the shot angle offset.
@@ -903,157 +885,96 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
         //     ev.position.x, ev.position.y, ev.id
         // );
 
-        // Removes old firing lines
-        for line in firing_line.0.iter() {
-            commands.entity(*line).despawn();
-        }
-        firing_line.0 = Vec::new();
-
         if let Some(selected) = selected_entity.0 {
             let window = windows.get(cursor_event.id).unwrap();
             let cursor_position =
                 cursor_event.position - Vec2::new(window.width() / 2., window.height() / 2.);
-            let (camera_transform, _, _) = camera_query.iter().nth(1).unwrap();
+            let (camera_transform, _, _,_) = camera_query.iter().nth(1).unwrap();
             // Get cursor right position relative to camera
             let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
 
             // Get the pixels corresponding to the center of the hex `selected` on the grid.
             let hex = hex_grid.logical_pixels(selected).unwrap();
-            let extended_bounds = {
-                let [x, y] = hex_grid.logical_pixel_bounds.clone();
-                // We expand bounds so line is drawn to edge and doesn't end at edge hex
-                let [w, h] = [HEX_WIDTH, HEX_HEIGHT];
-                [x.start - w..x.end + w, y.start - h..y.end + h]
-            };
 
-            // Center firing line
-            let center = end_point(
-                hex,
-                cursor_position.to_array(),
-                extended_bounds.clone(),
-                0f32,
-            );
+            let (unit, unit_transform,_) = unit_query.get_mut(hex_grid[selected].entity()).unwrap();
+            let (_,firing_spread_transform,_) = firing_spread_query.get_mut(unit.accuracy_field).unwrap();
 
-            let (unit, unit_transform) = unit_query.get_mut(hex_grid[selected].entity()).unwrap();
-            let unit = unit.into_inner();
-
-            let transform = Transform {
-                translation: Vec3::new(0f32, 0f32, FIRING_LINE_Z),
-                ..Default::default()
-            };
-
-            // Draws offset firing lines
-            let mut angle_offset = DISTRIBUTION_SAMPLES_STEP;
-            let mut lines = Vec::new();
-            let hex_vec = Vec2::from(hex);
-
-            let (mut neg_last, mut pos_last) = (Vec2::from(center), Vec2::from(center));
-            for i in 0..DISTRIBUTION_BUCKETS {
-                let colour = get_gradient_colour(unit.firing_buckets[i]);
-                let neg_vec = {
-                    let neg = end_point(
-                        hex,
-                        cursor_position.to_array(),
-                        extended_bounds.clone(),
-                        -angle_offset,
-                    );
-                    Vec2::from(neg)
-                };
-                let pos_vec = {
-                    let pos = end_point(
-                        hex,
-                        cursor_position.to_array(),
-                        extended_bounds.clone(),
-                        angle_offset,
-                    );
-                    Vec2::from(pos)
-                };
-                let draw = DrawMode::Outlined {
-                    fill_mode: FillMode::color(Color::rgba(
-                        colour[0], colour[1], colour[2], colour[3],
-                    )),
-                    outline_mode: StrokeMode::new(
-                        Color::rgba(colour[0], colour[1], colour[2], colour[3]),
-                        0f32,
-                    ),
-                };
-                assert!(neg_last.is_finite());
-                assert!(neg_vec.is_finite());
-                assert!(hex_vec.is_finite());
-                let neg_slice = bevy_prototype_lyon::shapes::Polygon {
-                    points: vec![neg_last, neg_vec, hex_vec],
-                    closed: true,
-                };
-                assert!(pos_last.is_finite());
-                assert!(pos_vec.is_finite());
-                assert!(hex_vec.is_finite());
-                let pos_slice = bevy_prototype_lyon::shapes::Polygon {
-                    points: vec![pos_last, pos_vec, hex_vec],
-                    closed: true,
-                };
-
-                lines.push(
-                    commands
-                        .spawn_bundle(GeometryBuilder::build_as(
-                            &neg_slice,
-                            draw.clone(),
-                            transform.clone(),
-                        ))
-                        .id(),
-                );
-                lines.push(
-                    commands
-                        .spawn_bundle(GeometryBuilder::build_as(
-                            &pos_slice,
-                            draw.clone(),
-                            transform.clone(),
-                        ))
-                        .id(),
-                );
-                neg_last = neg_vec;
-                pos_last = pos_vec;
-                angle_offset += DISTRIBUTION_SAMPLES_STEP;
-            }
-
-            assert!(transform.translation.is_finite(), "Firing line error");
-
-            // Draws center aiming line
-            let (from, to) = (Vec2::from(hex), Vec2::from(center));
-            assert!(from.is_finite());
-            assert!(to.is_finite());
-            lines.push(
-                commands
-                    .spawn_bundle(GeometryBuilder::build_as(
-                        &bevy_prototype_lyon::shapes::Line(from, to),
-                        DrawMode::Outlined {
-                            fill_mode: FillMode::color(Color::rgba(0., 0., 0., AIMING_LINE_ALPHA)),
-                            outline_mode: StrokeMode::new(
-                                Color::rgba(0., 0., 0., AIMING_LINE_ALPHA),
-                                HEX_OUTLINE_WIDTH,
-                            ),
-                        },
-                        transform.clone(),
-                    ))
-                    .id(),
-            );
-            // #[cfg(debug_assertions)]
-            // println!("updated center firing lines");
-
-            firing_line.0 = lines;
-
-            // Rotates sprite
-
-            // #[cfg(debug_assertions)]
-            // println!("updating unit angle");
-
+            // Rotates units
             let [x, y] = cursor_position.to_array();
             let angle = (y - hex[1]).atan2(x - hex[0]);
             let offset_angle = angle + ANGLE_PINT_OFFSET;
             assert!(offset_angle.is_finite(), "Unit rotation error");
             unit_transform.into_inner().rotation = Quat::from_rotation_z(offset_angle);
 
-            // #[cfg(debug_assertions)]
-            // println!("updated unit firing angle");
+            let firing_spread_transform = firing_spread_transform.into_inner();
+            firing_spread_transform.rotation = Quat::from_rotation_z(angle);
+            
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
+            
+            let fire_center = [firing_spread_transform.translation[0],firing_spread_transform.translation[1]];
+            let new = rotate_point_around_point(fire_center,hex,angle);
+            println!("new: {:?}",new);
+            let difference = Vec3::new(new[0]-hex[0],new[1]-hex[1],0f32);
+            // println!("hex->fire_center: {:?} -> {:?} ({:?})",hex,fire_center,difference);
+            commands.spawn_bundle(SpriteBundle {
+                transform: Transform {
+                    translation: Vec3::new(new[0],new[1],10f32),
+                    scale: Vec3::new(5f32, 5f32, 10f32),
+                    ..Default::default()
+                },
+                sprite: Sprite {
+                    color: Color::rgb(0f32,1f32,0f32),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            commands.spawn_bundle(SpriteBundle {
+                transform: Transform {
+                    translation: Vec3::new(hex[0],hex[1],10f32),
+                    scale: Vec3::new(10f32, 10f32, 10f32),
+                    ..Default::default()
+                },
+                sprite: Sprite {
+                    color: Color::rgb(1f32,0f32,0f32),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            commands.spawn_bundle(SpriteBundle {
+                transform: Transform {
+                    translation: Vec3::new(fire_center[0],fire_center[1],10f32),
+                    scale: Vec3::new(10f32, 10f32, 10f32),
+                    ..Default::default()
+                },
+                sprite: Sprite {
+                    color: Color::rgb(0f32,0f32,1f32),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            let new_center = firing_spread_transform.translation - difference;
+            commands.spawn_bundle(SpriteBundle {
+                transform: Transform {
+                    translation: Vec3::new(new_center[0],new_center[1],10f32),
+                    scale: Vec3::new(10f32, 10f32, 10f32),
+                    ..Default::default()
+                },
+                sprite: Sprite {
+                    color: Color::rgb(1f32,1f32,1f32),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            // firing_spread_transform.translation = new_center;
         }
     }
 }

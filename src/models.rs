@@ -576,6 +576,9 @@ static UnitCounter: AtomicUsize = AtomicUsize::new(0);
 #[derive(Component, Debug)]
 pub struct FiringSpread();
 
+
+pub const FIRING_SPREAD_WIDTH: u32 = 1000;
+pub const FIRING_SPREAD_HEIGHT: u32 = 1000;
 /// A player or AI controlled unit/soldier/pawn.
 #[derive(Component, Debug)]
 pub struct Unit {
@@ -641,12 +644,10 @@ impl Unit {
         // Calculating
         // -----------------------------------------------------------------------------------------
 
-        const WIDTH: u32 = 1000;
-        const HEIGHT: u32 = 1000;
-        const START: [f32; 2] = [0f32, HEIGHT as f32 / 2f32];
-        const END: [f32; 2] = [WIDTH as f32, HEIGHT as f32 / 2f32];
+        const START: [f32; 2] = [0f32, FIRING_SPREAD_HEIGHT as f32 / 2f32];
+        const END: [f32; 2] = [FIRING_SPREAD_WIDTH as f32, FIRING_SPREAD_WIDTH as f32 / 2f32];
         // Forms image/texture we use for accuracy spread to avoid recalculation.
-        let mut spread_image = image::RgbaImage::new(WIDTH, HEIGHT);
+        let mut spread_image = image::RgbaImage::new(FIRING_SPREAD_WIDTH, FIRING_SPREAD_HEIGHT);
         // Draw slices
         let mut angle_offset = crate::DISTRIBUTION_SAMPLES_STEP;
         let start = imageproc::point::Point {
@@ -661,8 +662,6 @@ impl Unit {
 
         #[cfg(debug_assertions)]
         println!("Drawing");
-        #[cfg(debug_assertions)]
-        let start_inst = std::time::Instant::now();
 
         for i in 0..crate::DISTRIBUTION_BUCKETS {
             let colour = {
@@ -675,7 +674,7 @@ impl Unit {
                 ])
             };
             let neg_vec = {
-                let nv = crate::end_point_unbound(START, END, -angle_offset, WIDTH as f32);
+                let nv = crate::end_point_unbound(START, END, -angle_offset, FIRING_SPREAD_WIDTH as f32);
                 // println!("nv: {:?}",nv);
                 imageproc::point::Point {
                     x: nv[0] as i32,
@@ -683,7 +682,7 @@ impl Unit {
                 }
             };
             let pos_vec = {
-                let pv = crate::end_point_unbound(START, END, angle_offset, WIDTH as f32);
+                let pv = crate::end_point_unbound(START, END, angle_offset, FIRING_SPREAD_WIDTH as f32);
                 imageproc::point::Point {
                     x: pv[0] as i32,
                     y: pv[1] as i32,
@@ -727,7 +726,7 @@ impl Unit {
         let accuracy_field = commands
             .spawn_bundle(SpriteBundle {
                 transform: Transform {
-                    translation: Vec3::from((x + WIDTH as f32 / 2f32, y, -1f32)),
+                    translation: Vec3::from((x + FIRING_SPREAD_WIDTH as f32 / 2f32, y, -1f32)),
                     scale: Vec3::new(1f32, 1f32, 1f32),
                     ..Default::default()
                 },
