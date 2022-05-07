@@ -910,21 +910,6 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
             let firing_spread_transform = firing_spread_transform.into_inner();
             firing_spread_transform.rotation = Quat::from_rotation_z(angle);
             
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
-            
-            //println!("new: {:?}",new);
-            //let difference = Vec3::new(new[0]-hex[0],new[1]-hex[1],0f32);
-            // println!("hex->fire_center: {:?} -> {:?} ({:?})",hex,fire_center,difference);
-
             let target_pos = Vec2::new(x, y); 
             
             let sprite_pos = unit_transform.translation.truncate() + (Vec2::normalize(target_pos - unit_transform.translation.truncate()) * (FIRING_SPREAD_WIDTH as f32 / 2f32));
