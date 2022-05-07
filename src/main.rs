@@ -904,7 +904,8 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
             let angle = (y - hex[1]).atan2(x - hex[0]);
             let offset_angle = angle + ANGLE_PINT_OFFSET;
             assert!(offset_angle.is_finite(), "Unit rotation error");
-            unit_transform.into_inner().rotation = Quat::from_rotation_z(offset_angle);
+            let unit_transform = unit_transform.into_inner();
+            unit_transform.rotation = Quat::from_rotation_z(offset_angle);
 
             let firing_spread_transform = firing_spread_transform.into_inner();
             firing_spread_transform.rotation = Quat::from_rotation_z(angle);
@@ -920,26 +921,17 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
             // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
             // HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE HERE
             
-            let fire_center = [firing_spread_transform.translation[0],firing_spread_transform.translation[1]];
-            let new = rotate_point_around_point(fire_center,hex,angle);
-            println!("new: {:?}",new);
-            let difference = Vec3::new(new[0]-hex[0],new[1]-hex[1],0f32);
+            //println!("new: {:?}",new);
+            //let difference = Vec3::new(new[0]-hex[0],new[1]-hex[1],0f32);
             // println!("hex->fire_center: {:?} -> {:?} ({:?})",hex,fire_center,difference);
+
+            let target_pos = Vec2::new(x, y); 
+            
+            let sprite_pos = unit_transform.translation.truncate() + (Vec2::normalize(target_pos - unit_transform.translation.truncate()) * (FIRING_SPREAD_WIDTH as f32 / 2f32));
+            
             commands.spawn_bundle(SpriteBundle {
                 transform: Transform {
-                    translation: Vec3::new(new[0],new[1],10f32),
-                    scale: Vec3::new(5f32, 5f32, 10f32),
-                    ..Default::default()
-                },
-                sprite: Sprite {
-                    color: Color::rgb(0f32,1f32,0f32),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-            commands.spawn_bundle(SpriteBundle {
-                transform: Transform {
-                    translation: Vec3::new(hex[0],hex[1],10f32),
+                    translation: Vec3::new(sprite_pos[0],sprite_pos[1],10f32),
                     scale: Vec3::new(10f32, 10f32, 10f32),
                     ..Default::default()
                 },
@@ -949,32 +941,10 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                 },
                 ..Default::default()
             });
-            commands.spawn_bundle(SpriteBundle {
-                transform: Transform {
-                    translation: Vec3::new(fire_center[0],fire_center[1],10f32),
-                    scale: Vec3::new(10f32, 10f32, 10f32),
-                    ..Default::default()
-                },
-                sprite: Sprite {
-                    color: Color::rgb(0f32,0f32,1f32),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-            let new_center = firing_spread_transform.translation - difference;
-            commands.spawn_bundle(SpriteBundle {
-                transform: Transform {
-                    translation: Vec3::new(new_center[0],new_center[1],10f32),
-                    scale: Vec3::new(10f32, 10f32, 10f32),
-                    ..Default::default()
-                },
-                sprite: Sprite {
-                    color: Color::rgb(1f32,1f32,1f32),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-            // firing_spread_transform.translation = new_center;
+
+            firing_spread_transform.translation = Vec3::from((sprite_pos, 10f32));
+
+            println!("firing_spread_transform.translation: {:?}\n firing_spread_transform.rotation: {:?}",firing_spread_transform.translation, firing_spread_transform.rotation);
         }
     }
 }
