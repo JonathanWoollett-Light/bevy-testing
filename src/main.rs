@@ -93,7 +93,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, audio: Res<Audi
     let grid_width = 39;
 
     let mut hex_grid = HexGrid::new(grid_width, grid_height);
-    hex_grid.spawn_background(&mut commands, asset_server);
+    hex_grid.spawn_background(&mut commands);
 
     // Adds some obstructions
     let map: MapDescriptor =

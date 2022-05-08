@@ -264,7 +264,7 @@ impl<T: std::fmt::Debug> HexGrid<T> {
         x < self.width && y < self.height
     }
     /// Render background hexagons on grid.
-    pub fn spawn_background(&self, commands: &mut Commands, asset_server: &AssetServer) {
+    pub fn spawn_background(&self, commands: &mut Commands) {
         #[cfg(debug_assertions)]
         println!("spawn_background() started");
 
@@ -598,7 +598,7 @@ impl std::ops::DerefMut for EnemyUnit {
     }
 }
 
-static UnitCounter: AtomicUsize = AtomicUsize::new(0);
+static UNIT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Component, Debug)]
 pub struct FiringSpread();
@@ -652,7 +652,7 @@ impl Unit {
         }
     }
     fn default(commands: &mut Commands, asset_server: &AssetServer, [x, y]: [f32; 2]) -> Entity {
-        const DEFAULT_UNIT_ACCURACY_DEVIATION: f32 = 0.5;
+        const DEFAULT_UNIT_ACCURACY_DEVIATION: f32 = 0.1;
         let firing_distribution =
             rand_distr::Normal::new(0f32, DEFAULT_UNIT_ACCURACY_DEVIATION).unwrap();
         let buckets = crate::buckets(firing_distribution);
@@ -741,7 +741,7 @@ impl Unit {
         #[cfg(debug_assertions)]
         let start_inst = std::time::Instant::now();
 
-        let count = UnitCounter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let count = UNIT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         std::fs::create_dir_all("./assets/cache").unwrap();
         spread_image
             .save(format!("./assets/cache/{}.png", count))
@@ -757,7 +757,11 @@ impl Unit {
         let accuracy_field = commands
             .spawn_bundle(SpriteBundle {
                 transform: Transform {
-                    translation: Vec3::from((x + FIRING_SPREAD_WIDTH as f32 / 2f32, y, BEHIND_BACKGROUND_Z)),
+                    translation: Vec3::from((
+                        x + FIRING_SPREAD_WIDTH as f32 / 2f32,
+                        y,
+                        BEHIND_BACKGROUND_Z,
+                    )),
                     scale: Vec3::new(1f32, 1f32, 1f32),
                     ..Default::default()
                 },
