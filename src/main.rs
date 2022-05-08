@@ -272,7 +272,7 @@ fn unit_movement_system(
             firing_transform.translation = Vec3::new(
                 firing_transform.translation[0],
                 firing_transform.translation[1],
-                -1f32,
+                BEHIND_BACKGROUND_Z,
             );
 
             // De-spawns old movement components
@@ -387,7 +387,7 @@ fn unit_movement_system(
                             firing_transform.translation = Vec3::new(
                                 firing_transform.translation[0],
                                 firing_transform.translation[1],
-                                -1f32,
+                                BEHIND_BACKGROUND_Z,
                             );
                         }
                         // Movement range
@@ -476,7 +476,7 @@ fn spawn_text(
                 },
             ),
             transform: Transform {
-                translation: Vec3::new(x, y, 0f32),
+                translation: Vec3::new(x, y, 1f32),
                 ..Default::default()
             },
             ..Default::default()
@@ -792,10 +792,7 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                             if hex == selected {
                                 continue;
                             }
-                            // If hex outside grid
-                            if !hex_grid.contains_index(hex) {
-                                break;
-                            }
+                            debug_assert!(hex_grid.contains_index(hex));
                             hex_path.insert(hex);
 
                             match hex_grid[hex] {
@@ -937,7 +934,7 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
 
             firing_spread_transform.translation = Vec3::from((sprite_pos, 10f32));
 
-            println!("firing_spread_transform.translation: {:?}\n firing_spread_transform.rotation: {:?}",firing_spread_transform.translation, firing_spread_transform.rotation);
+            // println!("firing_spread_transform.translation: {:?}\n firing_spread_transform.rotation: {:?}",firing_spread_transform.translation, firing_spread_transform.rotation);
         }
     }
 }

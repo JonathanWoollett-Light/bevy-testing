@@ -30,6 +30,10 @@ pub struct HexGrid<T: std::fmt::Debug> {
     pub highlights: HashMap<Colour, Entity>,
 }
 
+// The depth of black hexagons drawn off the edge of the map.
+const BACKGROUND_WIDTH: usize = 10000;
+const BACKGROUND_HEIGHT: usize = 10000;
+
 #[derive(Debug, Component)]
 pub struct Animation {
     timer: Timer,
@@ -78,6 +82,9 @@ impl Animation {
         }
     }
 }
+
+pub const BACKGROUND_Z: f32 = -1f32;
+pub const BEHIND_BACKGROUND_Z: f32 = BACKGROUND_Z - 1f32;
 
 impl HexGrid<HexItem> {
     pub fn add_enemy(
@@ -209,7 +216,8 @@ impl<T: std::fmt::Debug + Default + Copy> HexGrid<T> {
         };
         this.logical_pixel_bounds = {
             let [xs, ys] = this.unchecked_logical_pixels([0, 0]);
-            let [xe, ye] = this.unchecked_logical_pixels([this.width - 1, this.height - 1]);
+            let [xe, ye] = this
+                .unchecked_logical_pixels([(this.width - 1) as isize, (this.height - 1) as isize]);
             [xs..xe, ys..ye]
         };
         this
@@ -218,15 +226,15 @@ impl<T: std::fmt::Debug + Default + Copy> HexGrid<T> {
 impl<T: std::fmt::Debug> HexGrid<T> {
     /// Gets logical pixel coordinates of center of hex of a given index, returning `None` if the
     ///  given coordinates do not correspond to a hex in the grid.
-    pub fn logical_pixels(&self, index: [usize; 2]) -> Option<[f32; 2]> {
-        if self.contains_index(index) {
-            Some(self.unchecked_logical_pixels(index))
+    pub fn logical_pixels(&self, [x, y]: [usize; 2]) -> Option<[f32; 2]> {
+        if self.contains_index([x, y]) {
+            Some(self.unchecked_logical_pixels([x as isize, y as isize]))
         } else {
             None
         }
     }
     /// Gets logical pixel coordinates of center of hex of a given index.
-    pub fn unchecked_logical_pixels(&self, [x, y]: [usize; 2]) -> [f32; 2] {
+    pub fn unchecked_logical_pixels(&self, [x, y]: [isize; 2]) -> [f32; 2] {
         [
             -(crate::HEX_WIDTH * self.width as f32 / 2f32) + crate::HEX_WIDTH * x as f32,
             -(crate::HEX_HEIGHT * self.height as f32 / 2f32)
@@ -260,26 +268,45 @@ impl<T: std::fmt::Debug> HexGrid<T> {
         #[cfg(debug_assertions)]
         println!("spawn_background() started");
 
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let [cx, cy] = self.logical_pixels([x, y]).unwrap();
-                // Spawns hex guide
-                // -----------------------------------
-                commands.spawn_bundle(GeometryBuilder::build_as(
-                    &bevy_prototype_lyon::shapes::RegularPolygon {
-                        sides: 6,
-                        center: Vec2::new(cx, cy),
-                        feature: RegularPolygonFeature::SideLength(crate::HEX_SIDE_LENGTH),
-                    },
-                    DrawMode::Outlined {
-                        fill_mode: FillMode::color(HEX_COLOR),
-                        outline_mode: StrokeMode::new(
-                            crate::HEX_OUTLINE_COLOR,
-                            crate::HEX_OUTLINE_WIDTH,
-                        ),
-                    },
-                    Transform::default(),
-                ));
+        let spawn_hex = |[cx, cy]: [f32; 2], c: &mut Commands| {
+            c.spawn_bundle(GeometryBuilder::build_as(
+                &bevy_prototype_lyon::shapes::RegularPolygon {
+                    sides: 6,
+                    center: Vec2::new(cx, cy),
+                    feature: RegularPolygonFeature::SideLength(crate::HEX_SIDE_LENGTH),
+                },
+                DrawMode::Outlined {
+                    fill_mode: FillMode::color(HEX_COLOR),
+                    outline_mode: StrokeMode::new(
+                        crate::HEX_OUTLINE_COLOR,
+                        crate::HEX_OUTLINE_WIDTH,
+                    ),
+                },
+                Transform::default(),
+            ));
+        };
+        // Spawns black background at 0f32.
+        {
+            let center =
+                self.unchecked_logical_pixels([self.width as isize / 2, self.height as isize / 2]);
+            commands.spawn_bundle(SpriteBundle {
+                transform: Transform {
+                    translation: Vec3::new(center[0], center[1], BACKGROUND_Z),
+                    scale: Vec3::new(BACKGROUND_WIDTH as f32, BACKGROUND_HEIGHT as f32, 1f32),
+                    ..Default::default()
+                },
+                sprite: Sprite {
+                    color: Color::BLACK,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
+
+        for y in 0..self.height as isize {
+            for x in 0..self.width as isize {
+                let pos = self.unchecked_logical_pixels([x, y]);
+                spawn_hex(pos, commands);
                 // // Spawns background texture sprites
                 // // -----------------------------------
                 // // Elements higher up on the y axis we want to be behind elements lower down, thus we subtract this from the z dimension.
@@ -576,8 +603,8 @@ static UnitCounter: AtomicUsize = AtomicUsize::new(0);
 #[derive(Component, Debug)]
 pub struct FiringSpread();
 
-pub const FIRING_SPREAD_WIDTH: u32 = 1000;
-pub const FIRING_SPREAD_HEIGHT: u32 = 1000;
+pub const FIRING_SPREAD_WIDTH: u32 = 2000;
+pub const FIRING_SPREAD_HEIGHT: u32 = 2000;
 /// A player or AI controlled unit/soldier/pawn.
 #[derive(Component, Debug)]
 pub struct Unit {
@@ -726,11 +753,11 @@ impl Unit {
         // Creating
         // -----------------------------------------------------------------------------------------
 
-        // Scale the accuracy field to the screen resolution
+        // TODO: Scale the accuracy field to the screen resolution
         let accuracy_field = commands
             .spawn_bundle(SpriteBundle {
                 transform: Transform {
-                    translation: Vec3::from((x + FIRING_SPREAD_WIDTH as f32 / 2f32, y, -1f32)),
+                    translation: Vec3::from((x + FIRING_SPREAD_WIDTH as f32 / 2f32, y, BEHIND_BACKGROUND_Z)),
                     scale: Vec3::new(1f32, 1f32, 1f32),
                     ..Default::default()
                 },
