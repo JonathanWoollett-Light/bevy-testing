@@ -376,7 +376,19 @@ fn unit_movement_system(
                         if let Some(old_index) = selected_entity.0 {
                             let (_, old_unit, _) =
                                 query.get_mut(hex_grid[old_index].entity()).unwrap();
-                            clear_reachable(old_unit.into_inner(), &mut commands);
+                            let old_unit = old_unit.into_inner();
+                            clear_reachable(old_unit, &mut commands);
+
+                            // Hides old accuracy field
+                            let (_, _, firing_transform, _) = firing_spread_query
+                                .get_mut(old_unit.accuracy_field)
+                                .unwrap();
+                            let firing_transform = firing_transform.into_inner();
+                            firing_transform.translation = Vec3::new(
+                                firing_transform.translation[0],
+                                firing_transform.translation[1],
+                                -1f32,
+                            );
                         }
                         // Movement range
                         let (_, new_unit, _) = query.get_mut(hex_grid[indices].entity()).unwrap();
@@ -674,7 +686,12 @@ fn animation_system(
 fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
     time: Res<Time>,
     selected_entity: ResMut<SelectedUnitOption>,
-    camera_query: Query<(&Transform, With<bevy::prelude::Camera>, Without<Unit>,Without<FiringSpread>)>,
+    camera_query: Query<(
+        &Transform,
+        With<bevy::prelude::Camera>,
+        Without<Unit>,
+        Without<FiringSpread>,
+    )>,
     mut unit_query: Query<(&mut Unit, &mut Transform, Without<FiringSpread>)>,
     mut firing_spread_query: Query<(&mut FiringSpread, &mut Transform, Without<Unit>)>,
     windows: Res<Windows>,
@@ -747,7 +764,7 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                     // Corrects cursor position
                     let cursor_position =
                         cursor_position - Vec2::new(window.width() / 2., window.height() / 2.);
-                    let (camera_transform, _, _,_) = camera_query.iter().nth(1).unwrap();
+                    let (camera_transform, _, _, _) = camera_query.iter().nth(1).unwrap();
                     let cursor_position =
                         normalize_cursor_position(cursor_position, camera_transform);
                     // Samples unit firing distribution getting the shot angle offset.
@@ -889,15 +906,17 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
             let window = windows.get(cursor_event.id).unwrap();
             let cursor_position =
                 cursor_event.position - Vec2::new(window.width() / 2., window.height() / 2.);
-            let (camera_transform, _, _,_) = camera_query.iter().nth(1).unwrap();
+            let (camera_transform, _, _, _) = camera_query.iter().nth(1).unwrap();
             // Get cursor right position relative to camera
             let cursor_position = normalize_cursor_position(cursor_position, camera_transform);
 
             // Get the pixels corresponding to the center of the hex `selected` on the grid.
             let hex = hex_grid.logical_pixels(selected).unwrap();
 
-            let (unit, unit_transform,_) = unit_query.get_mut(hex_grid[selected].entity()).unwrap();
-            let (_,firing_spread_transform,_) = firing_spread_query.get_mut(unit.accuracy_field).unwrap();
+            let (unit, unit_transform, _) =
+                unit_query.get_mut(hex_grid[selected].entity()).unwrap();
+            let (_, firing_spread_transform, _) =
+                firing_spread_query.get_mut(unit.accuracy_field).unwrap();
 
             // Rotates units
             let [x, y] = cursor_position.to_array();
@@ -909,10 +928,12 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
 
             let firing_spread_transform = firing_spread_transform.into_inner();
             firing_spread_transform.rotation = Quat::from_rotation_z(angle);
-            
-            let target_pos = Vec2::new(x, y); 
-            
-            let sprite_pos = unit_transform.translation.truncate() + (Vec2::normalize(target_pos - unit_transform.translation.truncate()) * (FIRING_SPREAD_WIDTH as f32 / 2f32));
+
+            let target_pos = Vec2::new(x, y);
+
+            let sprite_pos = unit_transform.translation.truncate()
+                + (Vec2::normalize(target_pos - unit_transform.translation.truncate())
+                    * (FIRING_SPREAD_WIDTH as f32 / 2f32));
 
             firing_spread_transform.translation = Vec3::from((sprite_pos, 10f32));
 

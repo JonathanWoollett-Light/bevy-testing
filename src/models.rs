@@ -576,7 +576,6 @@ static UnitCounter: AtomicUsize = AtomicUsize::new(0);
 #[derive(Component, Debug)]
 pub struct FiringSpread();
 
-
 pub const FIRING_SPREAD_WIDTH: u32 = 1000;
 pub const FIRING_SPREAD_HEIGHT: u32 = 1000;
 /// A player or AI controlled unit/soldier/pawn.
@@ -645,7 +644,10 @@ impl Unit {
         // -----------------------------------------------------------------------------------------
 
         const START: [f32; 2] = [0f32, FIRING_SPREAD_HEIGHT as f32 / 2f32];
-        const END: [f32; 2] = [FIRING_SPREAD_WIDTH as f32, FIRING_SPREAD_WIDTH as f32 / 2f32];
+        const END: [f32; 2] = [
+            FIRING_SPREAD_WIDTH as f32,
+            FIRING_SPREAD_WIDTH as f32 / 2f32,
+        ];
         // Forms image/texture we use for accuracy spread to avoid recalculation.
         let mut spread_image = image::RgbaImage::new(FIRING_SPREAD_WIDTH, FIRING_SPREAD_HEIGHT);
         // Draw slices
@@ -674,7 +676,8 @@ impl Unit {
                 ])
             };
             let neg_vec = {
-                let nv = crate::end_point_unbound(START, END, -angle_offset, FIRING_SPREAD_WIDTH as f32);
+                let nv =
+                    crate::end_point_unbound(START, END, -angle_offset, FIRING_SPREAD_WIDTH as f32);
                 // println!("nv: {:?}",nv);
                 imageproc::point::Point {
                     x: nv[0] as i32,
@@ -682,7 +685,8 @@ impl Unit {
                 }
             };
             let pos_vec = {
-                let pv = crate::end_point_unbound(START, END, angle_offset, FIRING_SPREAD_WIDTH as f32);
+                let pv =
+                    crate::end_point_unbound(START, END, angle_offset, FIRING_SPREAD_WIDTH as f32);
                 imageproc::point::Point {
                     x: pv[0] as i32,
                     y: pv[1] as i32,
