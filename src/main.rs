@@ -913,19 +913,6 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
             let target_pos = Vec2::new(x, y); 
             
             let sprite_pos = unit_transform.translation.truncate() + (Vec2::normalize(target_pos - unit_transform.translation.truncate()) * (FIRING_SPREAD_WIDTH as f32 / 2f32));
-            
-            commands.spawn_bundle(SpriteBundle {
-                transform: Transform {
-                    translation: Vec3::new(sprite_pos[0],sprite_pos[1],10f32),
-                    scale: Vec3::new(10f32, 10f32, 10f32),
-                    ..Default::default()
-                },
-                sprite: Sprite {
-                    color: Color::rgb(1f32,0f32,0f32),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
 
             firing_spread_transform.translation = Vec3::from((sprite_pos, 10f32));
 
