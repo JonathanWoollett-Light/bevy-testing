@@ -1,10 +1,11 @@
-use bevy::prelude::*;
-use bevy_prototype_lyon::prelude::*;
-use rand::{thread_rng, Rng};
 use std::{
     collections::{HashMap, HashSet},
     sync::atomic::AtomicUsize,
 };
+
+use bevy::prelude::*;
+use bevy_prototype_lyon::prelude::*;
+use rand::{thread_rng, Rng};
 
 const UNIT_SPRITE_SINGLE: &'static str = "units/enemy1idle1.png";
 const UNIT_SPRITE_PATH: &'static str = "./assets/units";
@@ -74,6 +75,7 @@ impl Animation {
             frames: iter,
         })
     }
+
     pub fn tick(&mut self, step: bevy::utils::Duration) -> Option<Handle<Image>> {
         if self.timer.tick(step).just_finished() {
             self.frames.next()
@@ -137,6 +139,7 @@ impl HexGrid<HexItem> {
         #[cfg(debug_assertions)]
         println!("add_unit() finished");
     }
+
     pub fn add_obstruction(
         &mut self,
         commands: &mut Commands,
@@ -145,9 +148,9 @@ impl HexGrid<HexItem> {
     ) {
         let [x, y] = self.logical_pixels(index).unwrap();
 
-        // Elements higher up on the y axis we want to be behind elements lower down, thus we subtract this from the z dimension.
-        // let z_adj = y as f32 / self.logical_pixel_bounds[1].end;
-        // println!("y: {:?}, z_adj: {}", y, z_adj);
+        // Elements higher up on the y axis we want to be behind elements lower down, thus we
+        // subtract this from the z dimension. let z_adj = y as f32 /
+        // self.logical_pixel_bounds[1].end; println!("y: {:?}, z_adj: {}", y, z_adj);
 
         crate::spawn_hex(
             [x, y],
@@ -171,7 +174,9 @@ impl HexGrid<HexItem> {
 
         self[index] = HexItem::Obstruction;
     }
-    /// Returns a 2d vec of reachable indices from the given index (where `vec[x][2]` denotes the an index reachable in `x` steps).
+
+    /// Returns a 2d vec of reachable indices from the given index (where `vec[x][2]` denotes the an
+    /// index reachable in `x` steps).
     pub fn reachable(&self, start: [usize; 2], movement: usize) -> Vec<Vec<[usize; 2]>> {
         let mut visited = HashSet::new();
         visited.insert(start);
@@ -224,6 +229,13 @@ impl<T: std::fmt::Debug + Default + Copy> HexGrid<T> {
     }
 }
 impl<T: std::fmt::Debug> HexGrid<T> {
+    const DIR_DIFFS: [[[isize; 2]; 6]; 2] = [
+        // even cols
+        [[1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [0, 1]],
+        // odd cols
+        [[1, 1], [1, 0], [0, -1], [-1, 0], [-1, 1], [0, 1]],
+    ];
+
     /// Gets logical pixel coordinates of center of hex of a given index, returning `None` if the
     ///  given coordinates do not correspond to a hex in the grid.
     pub fn logical_pixels(&self, [x, y]: [usize; 2]) -> Option<[f32; 2]> {
@@ -233,6 +245,7 @@ impl<T: std::fmt::Debug> HexGrid<T> {
             None
         }
     }
+
     /// Gets logical pixel coordinates of center of hex of a given index.
     pub fn unchecked_logical_pixels(&self, [x, y]: [isize; 2]) -> [f32; 2] {
         [
@@ -242,7 +255,9 @@ impl<T: std::fmt::Debug> HexGrid<T> {
                 + ((x % 2) as f32 * crate::HEX_HEIGHT / 2f32),
         ]
     }
-    /// Gets index of logical pixel coordinates in hex grid, if the the given coordinates are within the grid.
+
+    /// Gets index of logical pixel coordinates in hex grid, if the the given coordinates are within
+    /// the grid.
     pub fn index(&self, [x, y]: [f32; 2]) -> Option<[usize; 2]> {
         if self.logical_pixel_bounds[0].contains(&x) && self.logical_pixel_bounds[1].contains(&y) {
             // Horizontal index
@@ -259,10 +274,12 @@ impl<T: std::fmt::Debug> HexGrid<T> {
             None
         }
     }
+
     /// Returns if a given index is within bounds.
     pub fn contains_index(&self, [x, y]: [usize; 2]) -> bool {
         x < self.width && y < self.height
     }
+
     /// Render background hexagons on grid.
     pub fn spawn_background(&self, commands: &mut Commands) {
         #[cfg(debug_assertions)]
@@ -309,9 +326,10 @@ impl<T: std::fmt::Debug> HexGrid<T> {
                 spawn_hex(pos, commands);
                 // // Spawns background texture sprites
                 // // -----------------------------------
-                // // Elements higher up on the y axis we want to be behind elements lower down, thus we subtract this from the z dimension.
-                // let z_adj = (y as f32 / self.logical_pixel_bounds[1].end)
-                //     + (x as f32 / self.logical_pixel_bounds[0].end);
+                // // Elements higher up on the y axis we want to be behind elements lower down,
+                // thus we subtract this from the z dimension. let z_adj = (y as f32
+                // / self.logical_pixel_bounds[1].end)     + (x as f32 /
+                // self.logical_pixel_bounds[0].end);
                 // commands.spawn_bundle(SpriteBundle {
                 //     transform: Transform {
                 //         translation: Vec3::from((cx, cy, 0f32 - z_adj)),
@@ -331,7 +349,9 @@ impl<T: std::fmt::Debug> HexGrid<T> {
         #[cfg(debug_assertions)]
         println!("spawn_background() finished");
     }
-    /// Removes highlight for hex highlighted by `COLOUR` returning whether the highlight was present.
+
+    /// Removes highlight for hex highlighted by `COLOUR` returning whether the highlight was
+    /// present.
     pub fn remove_highlight(&mut self, commands: &mut Commands, colour: Colour) -> bool {
         // If highlight exists, remove it
         match self.highlights.remove(&colour) {
@@ -342,12 +362,15 @@ impl<T: std::fmt::Debug> HexGrid<T> {
             None => false,
         }
     }
+
     /// Highlights specific hex with `COLOUR`.
     ///
     /// This function returns:
     /// - `Ok(true)` If the given hex could be highlighted and an existing highlight was present.
-    /// - `Ok(false)` If the given hex could be highlighted and an existing highlight wasn't present.
-    /// - `Err(str)` If the given hex could not be highlighted (the coordinates where outside the grid).
+    /// - `Ok(false)` If the given hex could be highlighted and an existing highlight wasn't
+    ///   present.
+    /// - `Err(str)` If the given hex could not be highlighted (the coordinates where outside the
+    ///   grid).
     pub fn highlight_cell(
         &mut self,
         commands: &mut Commands,
@@ -366,6 +389,7 @@ impl<T: std::fmt::Debug> HexGrid<T> {
             Err("Hex coordinates given where outside grid thus hex could not be highlighted.")
         }
     }
+
     /// Returns a reference to an element returning `None` if the given indices are out of bounds.
     pub fn get(&self, index: [usize; 2]) -> Option<&T> {
         if self.contains_index(index) {
@@ -374,7 +398,9 @@ impl<T: std::fmt::Debug> HexGrid<T> {
             None
         }
     }
-    /// Returns a mutable reference to an element returning `None` if the given indices are out of bounds.
+
+    /// Returns a mutable reference to an element returning `None` if the given indices are out of
+    /// bounds.
     pub fn get_mut(&mut self, index: [usize; 2]) -> Option<&mut T> {
         if self.contains_index(index) {
             Some(&mut self[index])
@@ -382,15 +408,12 @@ impl<T: std::fmt::Debug> HexGrid<T> {
             None
         }
     }
-    const DIR_DIFFS: [[[isize; 2]; 6]; 2] = [
-        // even cols
-        [[1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [0, 1]],
-        // odd cols
-        [[1, 1], [1, 0], [0, -1], [-1, 0], [-1, 1], [0, 1]],
-    ];
-    /// Returns coordinates of neighbors, if these coordinates are present in the grid.
+
+    /// Gets the set of coordinates which neighbor the given coordinates
     ///
-    /// `self.neighbors([2,1])` returns `[Some([3,1]),Some([3,0]),Some([2,0]),Some([1,0]),Some([1,1]),None]`
+    /// `self.neighbors([2,1])` returns
+    /// `[Some([3,1]),Some([3,0]),Some([2,0]),Some([1,0]),Some([1,1]),None]` 
+    /// 
     /// ```text
     ///       ___     ___     ___     ___
     ///   ___╱1,7╲___╱3,7╲___╱5,7╲___╱7,7╲___
@@ -419,25 +442,29 @@ impl<T: std::fmt::Debug> HexGrid<T> {
     /// ╲___╱1,1╲___╱3,1╲
     ///     ╲___╱   ╲___╱
     /// ```
-    pub fn neighbors(&self, [col, row]: [usize; 2]) -> [Option<[usize; 2]>; 6] {
-        let [col, row] = [col as isize, row as isize];
-        let parity = col & 1;
+    pub const fn neighbor_coordinates(&self, [col, row]: [isize; 2]) -> [[isize; 2]; 6] {
+        let parity = col % 2; // TODO Double check this works, we may need `col & 1` instead
+        
         let group = &Self::DIR_DIFFS[parity as usize];
         [
-            self.offset_coord_wrapper(col + group[0][0], row + group[0][1]),
-            self.offset_coord_wrapper(col + group[1][0], row + group[1][1]),
-            self.offset_coord_wrapper(col + group[2][0], row + group[2][1]),
-            self.offset_coord_wrapper(col + group[3][0], row + group[3][1]),
-            self.offset_coord_wrapper(col + group[4][0], row + group[4][1]),
-            self.offset_coord_wrapper(col + group[5][0], row + group[5][1]),
+            [col + group[0][0], row + group[0][1]],
+            [col + group[1][0], row + group[1][1]],
+            [col + group[2][0], row + group[2][1]],
+            [col + group[3][0], row + group[3][1]],
+            [col + group[4][0], row + group[4][1]],
+            [col + group[5][0], row + group[5][1]],
         ]
     }
-    pub fn offset_coord_wrapper(&self, a: isize, b: isize) -> Option<[usize; 2]> {
+    // Gets the set of coordinates which neighbor the given coordinates
+    pub const fn neighbor_coordinates(&self, [col,row]:[usize;2]) -> [Option<[usize;2]>;6]
+
+    pub const fn offset_coord_wrapper(&self, a: isize, b: isize) -> Option<[usize; 2]> {
         match (usize::try_from(a), usize::try_from(b)) {
             (Ok(x), Ok(y)) if self.contains_index([x, y]) => Some([x, y]),
             _ => None,
         }
     }
+
     pub fn neighbor(&self, [col, row]: [usize; 2], direction: usize) -> Option<[usize; 2]> {
         let [col, row] = [col as isize, row as isize];
         let parity = col & 1;
@@ -448,6 +475,7 @@ impl<T: std::fmt::Debug> HexGrid<T> {
 
 impl<T: std::fmt::Debug> std::ops::Index<[usize; 2]> for HexGrid<T> {
     type Output = T;
+
     /// In a `2x4` hex grid the corresponding indices would be:
     /// ```text
     ///  ___     ___
@@ -534,6 +562,7 @@ impl HexItem {
             _ => panic!("called HexItem::entity() on non-entity item"),
         }
     }
+
     pub fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }
@@ -561,6 +590,7 @@ pub struct Laser {
 }
 impl std::ops::Deref for Lasers {
     type Target = Vec<Laser>;
+
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -588,6 +618,7 @@ pub struct SelectedUnitOption(pub Option<[usize; 2]>);
 pub struct EnemyUnit(pub Unit);
 impl std::ops::Deref for EnemyUnit {
     type Target = Unit;
+
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -651,6 +682,7 @@ impl Unit {
             }
         }
     }
+
     fn default(commands: &mut Commands, asset_server: &AssetServer, [x, y]: [f32; 2]) -> Entity {
         const DEFAULT_UNIT_ACCURACY_DEVIATION: f32 = 0.1;
         let firing_distribution =
@@ -694,13 +726,8 @@ impl Unit {
 
         for i in 0..crate::DISTRIBUTION_BUCKETS {
             let colour = {
-                let c = crate::get_gradient_colour(cumulative_buckets[i]);
-                image::Rgba([
-                    (c[0] * 255f32) as u8,
-                    (c[1] * 255f32) as u8,
-                    (c[2] * 255f32) as u8,
-                    (c[3] * 255f32) as u8,
-                ])
+                let c = crate::index_percentage(cumulative_buckets[i],&*crate::GRADIENT);
+                image::Rgba(*c)
             };
             let neg_vec = {
                 let nv =
@@ -825,6 +852,7 @@ impl MovementData {
         }
         *self = Default::default();
     }
+
     pub fn clear_time(&mut self, commands: &mut Commands) {
         for remaining_time in self.remaining_time.iter() {
             commands.entity(*remaining_time).despawn();

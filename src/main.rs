@@ -1,13 +1,39 @@
+#![warn(clippy::pedantic)]
 #![allow(incomplete_features)]
 #![feature(adt_const_params)]
 #![feature(const_fn_floating_point_arithmetic)]
-use bevy::{input::mouse::MouseWheel, prelude::*};
-use bevy_kira_audio::{Audio, AudioPlugin};
-use bevy_prototype_lyon::prelude::*;
-use rand_distr::Distribution;
+#![feature(const_mut_refs)]
 use std::collections::{HashMap, HashSet};
 
-const FIRING_LINE_ALPHA: f32 = 0.8;
+use bevy::{
+    app::App,
+    asset::AssetServer,
+    audio::Audio,
+    ecs::{
+        entity::Entity,
+        event::{EventReader, EventWriter},
+        query::{With, Without},
+        system::{Commands, Query, Res, ResMut},
+    },
+    input::{
+        keyboard::KeyCode,
+        mouse::{MouseButton, MouseWheel},
+        Input,
+    },
+    math::{Quat, Vec2, Vec3},
+    prelude::{Camera2dBundle, PlaybackSettings},
+    render::color::Color,
+    sprite::SpriteBundle,
+    text::{HorizontalAlign, Text, Text2dBundle, TextAlignment, TextStyle, VerticalAlign},
+    time::{Time, Timer},
+    transform::components::Transform,
+    window::{CursorMoved, Windows},
+};
+use bevy_prototype_lyon::prelude::*;
+use log::info;
+use rand_distr::Distribution;
+
+const FIRING_LINE_ALPHA: u8 = 200;
 const GRADIENT_DETAIL: usize = 1000;
 /// Alpha of center aiming line
 const AIMING_LINE_ALPHA: f32 = 0.;
@@ -15,20 +41,18 @@ const DISTRIBUTION_BUCKETS: usize = 500;
 const DISTRIBUTIONS_SAMPLES: usize = 100000;
 const DISTRIBUTION_SAMPLES_STEP: f32 = 0.002f32;
 const MAX_FIRE_ANGLE: f32 = (DISTRIBUTION_BUCKETS - 1) as f32 * DISTRIBUTION_SAMPLES_STEP;
-
+use bevy::DefaultPlugins;
 mod models;
 use models::*;
 
 // TODO Make this const
 lazy_static::lazy_static! {
     /// This is an example for using doc comment attributes
-    static ref GRADIENT: [[f32;4];GRADIENT_DETAIL] = gradient::<GRADIENT_DETAIL>([0.2,0.2,0.2,0.],[0.8666,0.0941,0.0941,FIRING_LINE_ALPHA]);
+    static ref GRADIENT: [[u8;4];GRADIENT_DETAIL] = gradient([20,20,20,0],[90,20,20,FIRING_LINE_ALPHA]);
 }
 
 /// Colour of lasers shot by units.
 const LASER_COLOUR: Color = Color::rgba(1f32, 0f32, 0f32, 1f32);
-/// Background colour.
-const BACKGROUND_COLOUR: Color = Color::rgb(0f32, 0f32, 0f32);
 /// Colour highlight on selected units.
 const UNIT_SELECTION_COLOUR: Colour = Colour(Color::rgba(0f32, 0f32, 1f32, 0.2f32));
 /// Minimum camera zoom/scale.
@@ -63,16 +87,14 @@ const LASER_WIDTH: f32 = 3f32;
 
 fn main() {
     App::new()
-        .insert_resource(ClearColor(BACKGROUND_COLOUR))
         .add_plugins(DefaultPlugins)
         .add_plugin(ShapePlugin)
-        .add_plugin(AudioPlugin)
         .add_startup_system(setup)
         .add_system(unit_movement_system)
         .add_system(camera_movement_system)
         .add_system(hover_system)
         .add_system(turnover_system)
-        .add_system(firing_system::<0.05f32, 0.05f32>)
+        .add_system(firing_system)
         .add_system(animation_system)
         .run();
 }
@@ -80,11 +102,9 @@ fn main() {
 /// Sets up initial system state.
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>, audio: Res<Audio>) {
     let asset_server = asset_server.into_inner();
-    #[cfg(debug_assertions)]
-    println!("setup() started");
+    info!("setup() started");
     // cameras
-    commands.spawn_bundle(OrthographicCameraBundle::new_2d());
-    commands.spawn_bundle(UiCameraBundle::default());
+    commands.spawn_bundle(Camera2dBundle::default());
     // Shoots remain on screen for 0.5 seconds
     commands.insert_resource(Lasers::default());
 
@@ -102,20 +122,17 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, audio: Res<Audi
     for hex in map.obstacles.into_iter() {
         hex_grid.add_obstruction(&mut commands, hex, asset_server);
     }
-    #[cfg(debug_assertions)]
-    println!("spawned obstructions");
+    info!("spawned obstructions");
 
     // Add units
     // ----------------------------------------------------
 
-    #[cfg(debug_assertions)]
-    println!("started spawning units");
+    info!("started spawning units");
 
     for index in map.player_spawns.iter() {
         hex_grid.add_unit(&mut commands, *index, asset_server);
     }
-    #[cfg(debug_assertions)]
-    println!("spawned units");
+    info!("spawned units");
 
     // #[cfg(debug_assertions)]
     // println!("started spawning enemies");
@@ -128,20 +145,18 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, audio: Res<Audi
     commands.insert_resource(hex_grid);
     commands.insert_resource(SelectedUnitOption::default());
     commands.insert_resource(FiringLines::default());
+
     #[cfg(debug_assertions)]
     commands.insert_resource(FiringPath::default());
 
     // Play background music
-    let channel = bevy_kira_audio::AudioChannel::new(String::from("background-music"));
-    audio.set_volume_in_channel(0.1, &channel);
-    audio.play_looped_in_channel(
+    audio.play_with_settings(
         asset_server
             .load("XCOM-Enemy-Unknown-Soundtrack-HQ-Act-1-Extended-Michael-McCann-YouTube.mp3"),
-        &channel,
+        PlaybackSettings::LOOP.with_volume(0.5),
     );
 
-    #[cfg(debug_assertions)]
-    println!("setup() finished");
+    info!("setup() finished");
 }
 
 /// Handles highlighting the tile the user's cursor is hovering over.
@@ -213,7 +228,8 @@ fn turnover_system(
         query.for_each_mut(|mut f| {
             f.remaining_time = f.time;
         });
-        // Since we may be changing the movement of a selected unit we need to update the movement range of this unit
+        // Since we may be changing the movement of a selected unit we need to update the movement
+        // range of this unit
         if let Some(selected) = selected_entity.0 {
             let selected_unit = query
                 .get_mut(hex_grid[selected].entity())
@@ -322,7 +338,8 @@ fn unit_movement_system(
                         let unit = unit.into_inner();
                         // println!("unit: {:?}",unit);
 
-                        // Gets distance to this new position (it will be `None` if the position is not reachable)
+                        // Gets distance to this new position (it will be `None` if the position is
+                        // not reachable)
                         if let Some(&distance) = unit.movement_data.reachable_tiles.get(&indices) {
                             // println!("distance: {:?}->{:?}={}",selected,indices,distance);
 
@@ -355,8 +372,10 @@ fn unit_movement_system(
                                 *camera_transform,
                             );
                             // Play movement sound
-                            audio.set_volume(0.1);
-                            audio.play(asset_server.load("PM_FN_Spawns_Portals_Teleports_5.mp3"));
+                            audio.play_with_settings(
+                                asset_server.load("PM_FN_Spawns_Portals_Teleports_5.mp3"),
+                                PlaybackSettings::ONCE.with_volume(0.3),
+                            );
                         } else {
                             println!("Cannot move: Outside unit's remaining movement points.");
                         }
@@ -463,18 +482,18 @@ fn spawn_text(
 ) -> Entity {
     commands
         .spawn_bundle(Text2dBundle {
-            text: Text::with_section(
+            text: Text::from_section(
                 text,
                 TextStyle {
                     font: asset_server.load("SmoochSans-Light.ttf"),
                     font_size,
                     color: Color::WHITE,
                 },
-                TextAlignment {
-                    vertical: VerticalAlign::Center,
-                    horizontal: HorizontalAlign::Center,
-                },
-            ),
+            )
+            .with_alignment(TextAlignment {
+                vertical: VerticalAlign::Center,
+                horizontal: HorizontalAlign::Center,
+            }),
             transform: Transform {
                 translation: Vec3::new(x, y, 1f32),
                 ..Default::default()
@@ -683,7 +702,7 @@ fn animation_system(
     });
 }
 /// Handles units firing weapons.
-fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
+fn firing_system(
     time: Res<Time>,
     selected_entity: ResMut<SelectedUnitOption>,
     camera_query: Query<(
@@ -704,6 +723,9 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
     lasers: ResMut<Lasers>,
     audio: Res<Audio>,
 ) {
+    const SHOT_SECONDS: f32 = 0.05f32;
+    const SHOT_DECAY: f32 = 0.05f32;
+
     let hex_grid = hex_grid.into_inner();
     // Decays all rendered lasers and updates timers.
     let lasers = lasers.into_inner();
@@ -712,7 +734,8 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
         .cloned()
         .filter_map(|mut laser| {
             // Ticks timer and checks if finished
-            // println!("laser.timer.elapsed(): {:?}, {}",laser.timer.elapsed(),laser.timer.finished());
+            // println!("laser.timer.elapsed(): {:?},
+            // {}",laser.timer.elapsed(),laser.timer.finished());
             if laser.timer.tick(time.delta()).just_finished() {
                 // Removes old entity
                 commands.entity(laser.entity).despawn();
@@ -800,8 +823,10 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                                     continue;
                                 }
                                 HexItem::Entity(entity) => {
-                                    audio.set_volume(0.2);
-                                    audio.play(asset_server.load("zapsplat_multimedia_game_sound_monster_hit_impact_kill_warp_weird_78163.mp3"));
+                                    audio.play_with_settings(
+                                        asset_server.load("zapsplat_multimedia_game_sound_monster_hit_impact_kill_warp_weird_78163.mp3"),
+                                        PlaybackSettings::ONCE.with_volume(0.7f32)
+                                    );
                                     // TODO: Do better death animation
                                     // Removes hit entity
                                     hex_grid[hex] = HexItem::Empty;
@@ -847,7 +872,8 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                     }
 
                     // TODO Fix so shot starts from edge of hex not center.
-                    // Draws shot (since I don't want to handle animation a bullet, its a laser which appears for a couple frames)
+                    // Draws shot (since I don't want to handle animation a bullet, its a laser
+                    // which appears for a couple frames)
                     let from = Vec2::from([ax, ay]);
                     // TODO Fix to so it doesn't end before hitting the grid edge or obstacle.
                     let to = current;
@@ -871,10 +897,10 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
                         from,
                         to,
                     });
-                    audio.set_volume(0.2);
-                    audio.play(
+                    audio.play_with_settings(
                         asset_server
                             .load("cartoon_anime_burst_laser_beam_energy_fast_hard_71598.mp3"),
+                        PlaybackSettings::ONCE.with_volume(0.2f32),
                     );
                     unit.remaining_time -= unit.firing_time;
 
@@ -934,16 +960,20 @@ fn firing_system<const SHOT_SECONDS: f32, const SHOT_DECAY: f32>(
 
             firing_spread_transform.translation = Vec3::from((sprite_pos, 10f32));
 
-            // println!("firing_spread_transform.translation: {:?}\n firing_spread_transform.rotation: {:?}",firing_spread_transform.translation, firing_spread_transform.rotation);
+            // println!("firing_spread_transform.translation: {:?}\n
+            // firing_spread_transform.rotation: {:?}",firing_spread_transform.translation,
+            // firing_spread_transform.rotation);
         }
     }
 }
 // Offset add to selected unit sprite rotation relative to cursor position angle.
 const ANGLE_PINT_OFFSET: f32 = std::f32::consts::PI / 2f32;
 
-/// Returns a point on line from `a` through `c` (where `c` is `b` rotated about `a` by `theta` radians) that lies on the `bounds`.
+/// Returns a point on line from `a` through `c` (where `c` is `b` rotated about `a` by `theta`
+/// radians) that lies on the `bounds`.
 ///
 /// <https://www.desmos.com/calculator/zdzfdwsjxa>
+#[allow(dead_code)]
 fn end_point(
     [ax, ay]: [f32; 2],
     [bx, by]: [f32; 2],
@@ -959,7 +989,7 @@ fn end_point(
     //     "{:?}->{:?} rotated by {:.3} gives {:?}",
     //     [ax, ay],[bx, by],theta,[cy,cx]
     // );
-    match (cy > ay, cx > ax) {
+    return match (cy > ay, cx > ax) {
         // Upper left quadrant
         (true, true) => [min(fy(y.end), x.end), min(y.end, fx(x.end))],
         // Lower left quadrant
@@ -968,6 +998,24 @@ fn end_point(
         (false, false) => [max(fy(y.start), x.start), max(y.start, fx(x.start))],
         // Upper right quadrant
         (true, false) => [max(fy(y.end), x.start), min(y.end, fx(x.start))],
+    };
+
+    /// [`std::cmp::max`] supporting f32
+    fn max(a: f32, b: f32) -> f32 {
+        if a > b {
+            a
+        } else {
+            b
+        }
+    }
+
+    /// [`std::cmp::min`] supporting f32
+    fn min(a: f32, b: f32) -> f32 {
+        if a < b {
+            a
+        } else {
+            b
+        }
     }
 }
 fn end_point_unbound([ax, ay]: [f32; 2], [bx, by]: [f32; 2], theta: f32, length: f32) -> [f32; 2] {
@@ -975,7 +1023,7 @@ fn end_point_unbound([ax, ay]: [f32; 2], [bx, by]: [f32; 2], theta: f32, length:
     let rad = (d + theta).tan();
     let fx = |x: f32| -> f32 { (rad * (x - ax)) + ay };
     // let fy = |y: f32| -> f32 { ((y - ay) / rad) + ax };
-    let [cx, cy] = rotate_point_around_point([ax, ay], [bx, by], theta);
+    // let [cx, cy] = rotate_point_around_point([ax, ay], [bx, by], theta);
     let dx = ax + length;
     [dx, fx(dx)]
 }
@@ -990,25 +1038,8 @@ fn rotate_point_around_point([ax, ay]: [f32; 2], [bx, by]: [f32; 2], theta: f32)
     ]
 }
 
-/// [`std::cmp::max`] supporting f32
-fn max(a: f32, b: f32) -> f32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
-}
-
-/// [`std::cmp::min`] supporting f32
-fn min(a: f32, b: f32) -> f32 {
-    if a < b {
-        a
-    } else {
-        b
-    }
-}
-
-/// Returns the probability of sampling specific values in given ranges (where ranges are presumed to be non-overlapping).
+/// Returns the probability of sampling specific values in given ranges (where ranges are presumed
+/// to be non-overlapping).
 fn buckets<D: rand_distr::Distribution<f32>>(dist: D) -> [f32; DISTRIBUTION_BUCKETS] {
     let buckets = {
         let mut buckets = [0u32; DISTRIBUTION_BUCKETS];
@@ -1017,7 +1048,8 @@ fn buckets<D: rand_distr::Distribution<f32>>(dist: D) -> [f32; DISTRIBUTION_BUCK
             .take(DISTRIBUTIONS_SAMPLES)
         {
             let abs_sample = sample.abs().clamp(0f32, MAX_FIRE_ANGLE);
-            // print!("{:.2}p,{} ",abs_sample / std::f32::consts::PI,(abs_sample / DISTRIBUTION_SAMPLES_STEP) as usize);
+            // print!("{:.2}p,{} ",abs_sample / std::f32::consts::PI,(abs_sample /
+            // DISTRIBUTION_SAMPLES_STEP) as usize);
             let bucket = (abs_sample / DISTRIBUTION_SAMPLES_STEP) as usize;
             assert!(bucket < DISTRIBUTION_BUCKETS);
             buckets[bucket] += 1;
@@ -1039,30 +1071,32 @@ fn buckets<D: rand_distr::Distribution<f32>>(dist: D) -> [f32; DISTRIBUTION_BUCK
 }
 
 /// Gets a gradient of `N` colours between `start`and `end`.
-fn gradient<const N: usize>(start: [f32; 4], end: [f32; 4]) -> [[f32; 4]; N] {
+const fn gradient<const N:usize>(start:[u8;4],end:[u8;4]) -> [[u8; 4]; N] {
     let step = [
-        (end[0] - start[0]) / N as f32,
-        (end[1] - start[1]) / N as f32,
-        (end[2] - start[2]) / N as f32,
-        (end[3] - start[3]) / N as f32,
+        (end[0] - start[0]) as f32 / N as f32,
+        (end[1] - start[1]) as f32 / N as f32,
+        (end[2] - start[2]) as f32 / N as f32,
+        (end[3] - start[3]) as f32 / N as f32,
     ];
-    let mut current = start;
-    let mut colours = [[Default::default(); 4]; N];
-    for i in 0..N {
-        colours[i] = current;
+    let mut current = [start[0] as f32, start[1] as f32, start[2] as f32, start[3] as f32];
+
+    let mut array: [[u8;4];N] = [[0;4];N];
+    let mut i = 0;
+    while i < N {
+        array[i] = [current[0] as u8,current[1] as u8,current[2] as u8,current[3] as u8];
 
         current[0] += step[0];
         current[1] += step[1];
         current[2] += step[2];
         current[3] += step[3];
+        i += 1;
     }
-    colours
+    array
+    
 }
-// 0 -> 0,
-// 0.5 -> GRADIENT_DETAIL/2,
-// 1 -> GRADIENT_DETAIL
-fn get_gradient_colour(x: f32) -> [f32; 4] {
-    let index = ((GRADIENT_DETAIL - 1) as f32 * x) as usize;
-    debug_assert!(index <= GRADIENT_DETAIL, "{}", index);
-    GRADIENT[((GRADIENT_DETAIL - 1) as f32 * x) as usize]
+// Indexes a slice by an offset from the front.
+fn index_percentage<T>(i: f32, slice: &[T]) -> &T {
+    let index = (slice.len() as f32 * i) as usize;
+    debug_assert!(index < slice.len());
+    &slice[index]
 }

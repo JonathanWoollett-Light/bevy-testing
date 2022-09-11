@@ -6,40 +6,21 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bevy = "0.8"
+
 # Accuracy spread images
 image = "0.24.2"
 imageproc = "0.23.0"
+
 # Misc
 lazy_static = "1.4.0"
-bevy_prototype_lyon = "0.5.0"
+bevy_prototype_lyon = "0.6.0"
 itertools = "0.10.3"
 rand = "0.8.5"
 rand_distr = "0.4.3"
+
 # Map loading
-serde = "1.0.136"
-serde_json = "1.0.79"
-# Audio
-[dependencies.bevy]
-version = "0.7"
-default-features = false
-# These are the remaining default features other than `bevy_audio` and `mp3`
-features = [
-  "render",
-  "bevy_winit",
-  "bevy_gilrs",
-  "png",
-  "hdr",
-  "filesystem_watcher",
-  "x11"
-]
-[dependencies.bevy_kira_audio]
-version = "0.9.0"
-# `ogg` format support is enabled by default, disable if you don't want it
-default-features = false
-# enable the features you care about
-features = [
-  "wav",
-  "flac",
-  "mp3",
-  "ogg",
-]
+serde = "1.0.143"
+serde_json = "1.0.83"
+
+log = "0.4.17"
